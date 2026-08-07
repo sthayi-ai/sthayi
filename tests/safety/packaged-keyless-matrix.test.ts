@@ -220,6 +220,26 @@ describe('the release runs the full keyless matrix against the INSTALLED tarball
     );
   });
 
+  it('never lets pipefail turn a successful short-circuiting output match into a miss', () => {
+    const step = packagedMatrixStep();
+    // With `set -o pipefail`, `producer | grep -q` can be nonzero after a real match because grep
+    // closes its input and the producer receives SIGPIPE. That once made CI say `proposal` was
+    // absent while printing the matching `1 proposal(s) queued` line in the same failure. It is
+    // worse for the canary check: the same false miss could accept output containing a secret.
+    expect(
+      step,
+      'expect_out still feeds short-circuiting grep from a pipe, so a real match can look absent',
+    ).toMatch(/if ! grep -Eq -- "\$1" "\$MATRIX_OUT_FILE"/);
+    expect(
+      step,
+      'refute_canary still feeds short-circuiting grep from a pipe, so a present secret can look absent',
+    ).toMatch(/if grep -qF -- "\$MATRIX_CANARY" "\$MATRIX_OUT_FILE"/);
+    expect(
+      step,
+      'captured command output still reaches a short-circuiting grep through a pipe',
+    ).not.toMatch(/printf[^\n]*\$MATRIX_OUT[^\n]*\|\s*grep\s+-[^\n]*q/);
+  });
+
   it('stays aligned with the source-driven twin on WHAT a correct command produces', () => {
     // The two layers must agree about outcomes or the packaged one drifts into a weaker gate.
     // This is alignment of EXPECTATIONS ONLY: the source matrix drives a build made out of the

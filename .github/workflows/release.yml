@@ -909,7 +909,10 @@ jobs:
 
           # THE OUTCOME OF THE COMMAND THAT JUST RAN. Exit 0 is not a result; these are.
           expect_out() {
-            if ! printf '%s\n' "$MATRIX_OUT" | grep -Eq -- "$1"; then
+            # Do not pipe a producer into short-circuiting `grep -q` while pipefail is active:
+            # after a match, grep may close early and make the producer's SIGPIPE turn the whole
+            # pipeline nonzero. Match the stable captured-output file directly instead.
+            if ! grep -Eq -- "$1" "$MATRIX_OUT_FILE"; then
               echo "::error::packaged matrix: $2"
               printf '%s\n' "$MATRIX_OUT"
               exit 1
@@ -949,7 +952,9 @@ jobs:
           }
 
           refute_canary() {
-            if printf '%s\n' "$MATRIX_OUT" | grep -qF -- "$MATRIX_CANARY"; then
+            # The same no-pipeline rule is security-relevant here: SIGPIPE must never turn a
+            # present secret into a false negative.
+            if grep -qF -- "$MATRIX_CANARY" "$MATRIX_OUT_FILE"; then
               echo "::error::packaged matrix: $1"
               exit 1
             fi
