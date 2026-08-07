@@ -2,8 +2,10 @@
 
 Releases are **tag-first**: pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which
 gates, drafts a GitHub release, and — after human approval of the protected `npm-production`
-environment — publishes the **exact gated tarball** to npm. There is no manual-dispatch publish
-of arbitrary refs and no local `npm publish`.
+environment — publishes the **exact gated tarball** to npm. A separate protected
+`mcp-production` job then proves the public npm metadata and, after its own approval, publishes the
+checked-in `server.json` to the official MCP Registry over short-lived GitHub OIDC. There is no
+manual-dispatch publish of arbitrary refs, no local `npm publish`, and no local Registry publish.
 
 The **anti-friction invariants below** are the release gate — every one must hold, every release.
 
@@ -33,7 +35,7 @@ The **anti-friction invariants below** are the release gate — every one must h
 - [ ] **No telemetry** — no network calls except explicitly invoked Oracle jobs and `sthayi
       qualify` calls to the user's selected provider. Oracle sends bounded, masked memory batches;
       `qualify` sends shipped synthetic conformance fixtures, not user memories.
-- [ ] **Runtime prerequisite is explicit** — user-facing installation docs state that v0.1.0
+- [ ] **Runtime prerequisite is explicit** — user-facing installation docs state that v0.1.1
       supports Node.js 22 and 24, recommends Node 24 LTS, and requires npm; they link to the
       official Node.js download page and distinguish that prerequisite from installing Sthayi.
       Installing Node.js may require administrator approval depending on the operating system and
@@ -79,7 +81,7 @@ The **anti-friction invariants below** are the release gate — every one must h
 - [ ] `pnpm audit --prod --audit-level moderate` exits 0 (the release workflow enforces this too).
 - [ ] CI green on the supported matrix: **Node 22 and Node 24 on Linux, macOS, and Windows**. The
       packed-tarball Node 22/24 smoke also runs on Linux. Every package manifest says
-      `22.x || 24.x`; unsupported majors are outside the v0.1.0 contract.
+      `22.x || 24.x`; unsupported majors are outside the v0.1.1 contract.
 - [ ] Runtime-policy tests prove unsupported majors—including Node 25—refuse before importing the
       native-dependent CLI, and native `NODE_MODULE_VERSION` mismatches on 22/24 produce the
       documented reinstall repair rather than a raw stack trace.
@@ -212,7 +214,8 @@ The **anti-friction invariants below** are the release gate — every one must h
       a correct release has. It is settled **semantically** instead: parsed as strict UTF-8 and
       compared **field by field** against the captured manifest — `name`, `version`, `type`, `bin`,
       `main`, `exports`, every `script`, every dependency map (including both spellings of the
-      bundled alias), `engines`, `os`/`cpu`/`libc`, `files` and `publishConfig`. The package's own
+      bundled alias), `mcpName`, `engines`, `os`/`cpu`/`libc`, `files` and `publishConfig`. The
+      MCP Registry ownership identity is operational metadata, not prose. The package's own
       `prepack`/`postpack` hooks are allowed **only unchanged**; any added install-time hook
       (`preinstall`, `install`, `postinstall`, `prepare`, …) is refused by name, because npm runs
       those on the installing user's machine. And every entry point the **packed** manifest names is
@@ -242,7 +245,7 @@ The **anti-friction invariants below** are the release gate — every one must h
       `pnpm freshtest` and a developer packing by hand — which is why they remain in the manifest
       and why the gate holds them to being present and **unchanged**.)
 
-## One-time setup (before the first release)
+## One-time setup (verify before publishing)
 
 - [ ] Configure **npm trusted publishing** for package `sthayi`: provider **GitHub Actions**,
       organization **`sthayi-ai`**, repository **`sthayi`**, workflow **`release.yml`**, environment
@@ -250,31 +253,33 @@ The **anti-friction invariants below** are the release gate — every one must h
       `NPM_TOKEN`; the publish job authenticates over short-lived OIDC credentials.
 - [ ] Create the protected **`npm-production` environment** in the GitHub repo settings with at
       least one required reviewer. The publish job will not run without an approval.
-- [ ] `npm view sthayi` shows the current placeholder/version from the owning account.
-- [ ] **Provenance vs repo visibility — choose one.** The publish job runs
+- [ ] Create a separate protected **`mcp-production` environment** with at least one required
+      reviewer and a `v*` tag deployment policy. The Registry job has `id-token: write` only so
+      `mcp-publisher login github-oidc` can exchange the workflow identity for a short-lived
+      credential; do not create or store a Registry token.
+- [ ] `npm view sthayi` shows the package is owned by the expected npm account.
+- [ ] **Keep the source repository public before pushing a release tag.** The publish job runs
       `npm publish <tarball> --provenance`, which publicly links the package to this repo and the
       building commit. Provenance requires the source repository to be **public at publish
-      time** — publishing with provenance from a private repo fails (and would otherwise leak
-      repo details to a public transparency log). Choose one, explicitly, before the first tag:
-      1. **Make the repo public BEFORE pushing the release tag** (recommended — keeps
-         provenance and the verified npm badge), or
-      2. **Keep the repo private for now** and remove `--provenance` from the publish step in
-         `.github/workflows/release.yml` as a deliberate owner edit; restore it when the repo
-         goes public.
+      time**; a private source repo makes the release fail. Do not weaken or remove provenance as
+      a workaround.
 
 ## Version identity (single source of truth)
 
 `packages/cli/src/version.ts` is the only version literal in source. The CLI `--version` and the
 MCP server's `serverInfo.version` both import it, and `packages/cli/src/version.test.ts` pins it
 to `packages/cli/package.json` — drift fails `pnpm test`, therefore `pnpm verify`, therefore the
-release. The workflow additionally asserts, on every release:
-`tag == package.json version == built CLI --version == MCP serverInfo.version` (the last via a
-real stdio `initialize` handshake against the installed tarball).
+release. `tests/safety/mcp-registry-contract.test.ts` also pins `packages/cli/server.json` and its
+npm package entry to that version, and pins `package.json#mcpName` to `server.json#name`. The
+workflow additionally asserts, on every release:
+`tag == package.json version == built CLI --version == MCP serverInfo.version == server.json
+version == server.json package version` (the server version via a real stdio `initialize`
+handshake against the installed tarball).
 
 ## Publish (per release)
 
-- [ ] Bump the version in **both** `packages/cli/package.json` and `packages/cli/src/version.ts`;
-      `pnpm verify` green.
+- [ ] Bump the version in `packages/cli/package.json`, `packages/cli/src/version.ts`,
+      `packages/cli/server.json`, and its npm package entry; `pnpm verify` green.
 - [ ] Merge to the default branch; CI green.
 - [ ] `git tag vX.Y.Z` on the merged commit and push the tag. Preflight rejects the run unless the
       tag is plain `vX.Y.Z`, equals the package version, and is reachable from the default branch.
@@ -311,13 +316,18 @@ real stdio `initialize` handshake against the installed tarball).
 - [ ] Approve the **`npm-production`** environment when prompted. Publish downloads the gated
       artifact, re-verifies its checksum, and publishes **that tarball file** with provenance —
       it never rebuilds.
-- [ ] After publish: `npm view sthayi@X.Y.Z version` shows the new version.
-- [ ] **Registry-name install smoke, before announcement:** from clean standard-user profiles or
+- [ ] After npm publish: `npm view sthayi@X.Y.Z version mcpName` shows the new version and exactly
+      `io.github.sthayi-ai/sthayi`.
+- [ ] Approve the separate **`mcp-production`** environment when prompted. That job checksum-pins
+      the official `mcp-publisher` binary, authenticates as this GitHub repository over OIDC,
+      publishes `packages/cli/server.json`, and verifies that the Registry API returns the exact
+      `io.github.sthayi-ai/sthayi@X.Y.Z` version. Retrying this job never re-enters npm publication.
+- [ ] **npm package-name install smoke, before announcement:** from clean standard-user profiles or
       disposable clean VMs, run the advertised package-name install/init form pinned to
       `sthayi@X.Y.Z`, then verify `--version` and run `doctor`. Cover macOS bash/zsh, Linux bash,
       Windows PowerShell 7, Windows PowerShell 5.1, and Windows cmd; use a separate clean profile or
       prefix for each shell route so one run cannot satisfy the next from leftover state. Do not
-      publish the draft GitHub release or announce the release until every registry-fetch smoke
+      publish the draft GitHub release or announce the release until every npm-registry fetch smoke
       passes. Record the dated registry-fetch result in the draft GitHub release notes before
       publishing that release. Do not rely on a later README edit: the README embedded in
       `sthayi@X.Y.Z` is fixed when that version is published to npm and cannot be changed in place.

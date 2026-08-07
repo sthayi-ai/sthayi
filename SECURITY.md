@@ -47,7 +47,7 @@ instead REFUSED at plan time — so `--dry-run` refuses too — with a message p
 install. Onboarding is therefore a durable install and then `sthayi init`, in one copy-paste line
 (bash/zsh):
 
-Sthayi v0.1.0 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
+Sthayi v0.1.1 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
 [README Quickstart](README.md#quickstart) explains how to check and install that separate
 prerequisite. Unsupported majors—including Node 25—are refused before the native SQLite dependency
 loads. Installing Node.js may require administrator approval depending on the operating system and
@@ -75,7 +75,7 @@ The Windows forms of the same command are documented in
 [`README.md`](README.md). Their user-space prefix, layout, shim and init mechanics are
 **host-validated for v0.1.0** on Windows 11 Pro 24H2 x64 under Node 22.23.2, using a standard
 (non-administrator) account and the checksum-verified packed tarball. That packed-tarball evidence
-does not itself cover delivery from the npm registry; the package-name registry-fetch smoke is a
+does not itself cover delivery from the npm registry; the npm package-name fetch smoke is a
 separate pre-announcement release gate.
 
 ### Optional loopback HTTP transport

@@ -24,7 +24,7 @@ only the local MCP server running on your machine. Theirs stay theirs. This one 
 
 ### Prerequisite: Node.js 22 or 24
 
-Sthayi v0.1.0 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. Check
+Sthayi v0.1.1 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. Check
 both before installing:
 
 ```text
@@ -143,7 +143,7 @@ export PATH="$HOME/.sthayi/bin:$PATH"    # add this line to your shell profile
 **Windows:** the same architecture and the same user-space prefix. The per-shell forms below are
 **host-validated for v0.1.0** with the checksum-verified packed tarball under a standard
 (non-administrator) account. That packed-tarball evidence does not itself cover delivery from the
-npm registry; the package-name registry-fetch smoke is a separate pre-announcement release gate.
+npm registry; the npm package-name fetch smoke is a separate pre-announcement release gate.
 Sthayi never modifies PATH itself, on any platform.
 
 **Windows security scope.** Sthayi's hardened filesystem discipline — the trust boundary that
@@ -214,7 +214,7 @@ Windows 11 Pro 24H2 x64 under Node 22.23.2, using a standard (non-administrator)
 checksum-verified packed tarball. Windows PowerShell 5.1, PowerShell 7.6.4 and `cmd.exe` all
 completed their install-and-init forms; the CLI, native SQLite binding, MCP server and
 reinstall/repin/unwire/uninstall lifecycle also passed. That packed-tarball evidence does not itself
-cover delivery from the npm registry; the package-name registry-fetch smoke is a separate
+cover delivery from the npm registry; the npm package-name fetch smoke is a separate
 pre-announcement release gate.
 
 Then ask any wired assistant: *"Use Sthayi memory: what do you know about my current projects?"* —

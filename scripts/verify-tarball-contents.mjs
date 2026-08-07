@@ -289,15 +289,17 @@ function normaliseBin(bin, name) {
 }
 
 /**
- * The fields a reviewer of a release actually has to have settled: what runs (`bin`, `main`,
- * `exports`, every `script`), what is fetched (every dependency map, both spellings of the bundled
- * alias), where it is allowed to run (`engines`, `os`, `cpu`, `libc`), what ships (`files`) and how
- * it is published (`publishConfig`). Everything else in a manifest is prose.
+ * The fields a reviewer of a release actually has to have settled: its package and MCP Registry
+ * identities (`name`, `version`, `mcpName`), what runs (`bin`, `main`, `exports`, every `script`),
+ * what is fetched (every dependency map, both spellings of the bundled alias), where it is allowed
+ * to run (`engines`, `os`, `cpu`, `libc`), what ships (`files`) and how it is published
+ * (`publishConfig`). Everything else in a manifest is prose.
  */
 export function manifestFacts(m) {
   return {
     name: m.name,
     version: m.version,
+    mcpName: m.mcpName,
     type: m.type,
     main: stripDot(m.main),
     bin: normaliseBin(m.bin, m.name),
