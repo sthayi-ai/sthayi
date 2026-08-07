@@ -1,6 +1,7 @@
 {
   "name": "sthayi",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "mcpName": "io.github.sthayi-ai/sthayi",
   "description": "Sthayi — the you that persists. Sovereign, local-first memory for every AI, over MCP.",
   "type": "module",
   "license": "MIT",

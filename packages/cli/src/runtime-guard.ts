@@ -1,4 +1,6 @@
-/** Node.js majors supported by Sthayi v0.1.0. Keep this deliberately explicit: odd-numbered
+import { VERSION } from './version.js';
+
+/** Node.js majors supported by the current Sthayi release. Keep this deliberately explicit: odd-numbered
  * releases are short-lived, and the CLI includes a native SQLite addon whose binaries follow the
  * Node.js LTS lines. */
 export const SUPPORTED_NODE_MAJORS = [22, 24] as const;
@@ -31,8 +33,8 @@ export function unsupportedNodeMessage(version: string): string | undefined {
   const detected =
     support.major === undefined ? JSON.stringify(version) : `v${version.replace(/^v/, '')}`;
   return [
-    `sthayi: Node.js ${detected} is not supported by Sthayi v0.1.0.`,
-    'Sthayi v0.1.0 supports Node.js 22 or 24 LTS; Node.js 24 LTS is recommended.',
+    `sthayi: Node.js ${detected} is not supported by Sthayi v${VERSION}.`,
+    `Sthayi v${VERSION} supports Node.js 22 or 24 LTS; Node.js 24 LTS is recommended.`,
     'Install Node.js 24 LTS from https://nodejs.org/en/download, then reinstall Sthayi under that Node.js version.',
   ].join('\n');
 }

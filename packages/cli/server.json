@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sthayi-ai/sthayi",
+  "title": "Sthayi",
+  "description": "Local-first AI memory over MCP. No account; you own the store.",
+  "websiteUrl": "https://sthayi.ai",
+  "repository": {
+    "url": "https://github.com/sthayi-ai/sthayi",
+    "source": "github",
+    "id": "1326112733",
+    "subfolder": "packages/cli"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "sthayi",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ]
+    }
+  ]
+}

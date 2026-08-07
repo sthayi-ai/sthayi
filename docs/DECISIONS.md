@@ -21,7 +21,7 @@ No other runtime deps without a new entry here.
 ## Build / tooling decisions
 
 - **Node support is the explicit set `22.x || 24.x`; Node 24 LTS is recommended.** This is not an
-  open-ended minimum: v0.1.0 refuses every other major—including Node 23, 25, and 26—before the CLI
+  open-ended minimum: the v0.1 release line refuses every other major—including Node 23, 25, and 26—before the CLI
   or its native SQLite dependency loads. `.nvmrc` (22) pins the development baseline only. CI runs
   the full suite on **Node 22 and Node 24 across Linux, macOS, and Windows**, and the release
   smoke-installs the packed tarball on 22 / 24; freshtest stays on Node 22. `better-sqlite3` ships

@@ -1290,6 +1290,20 @@ describe('the packed package.json is settled against the manifest the release co
       'name',
     ],
     [
+      'a different MCP Registry ownership identity',
+      (m: Record<string, unknown>) => {
+        m.mcpName = 'io.github.someone-else/sthayi';
+      },
+      'mcpName',
+    ],
+    [
+      'a missing MCP Registry ownership identity',
+      (m: Record<string, unknown>) => {
+        m.mcpName = undefined;
+      },
+      'mcpName',
+    ],
+    [
       'a restricted publishConfig turned public elsewhere',
       (m: Record<string, unknown>) => {
         m.publishConfig = { access: 'restricted', registry: 'https://example.invalid' };

@@ -17,11 +17,15 @@
 #     - draft-release: attaches the tarball + SHA256SUMS to a draft GitHub release.
 #     - publish: waits for approval in the protected `npm-production` environment, then
 #       publishes the exact gated tarball file with npm provenance. It NEVER rebuilds.
+#     - mcp-registry: after npm succeeds, waits for approval in the separate protected
+#       `mcp-production` environment, then publishes the checked-in server.json over GitHub OIDC
+#       and verifies the complete immutable record. A retry never republishes an existing version.
 #   There is no workflow_dispatch publish path: no publishing of arbitrary refs.
 #
 # Version identity: packages/cli/src/version.ts is the single source of truth (CLI --version and
-# MCP serverInfo.version both import it); version.test.ts pins it to package.json so drift fails
-# `pnpm verify` before it can reach this pipeline.
+# MCP serverInfo.version both import it); tests pin it to package.json and both server.json version
+# fields, and pin package.json mcpName to server.json name, so drift fails `pnpm verify` before it
+# can reach this pipeline.
 #
 # Trust posture: no third-party actions beyond actions/*, minimal permissions per job, workflow
 # values enter shell only via env: blocks (never direct ${{ }} interpolation in run: scripts),
@@ -905,7 +909,10 @@ jobs:
 
           # THE OUTCOME OF THE COMMAND THAT JUST RAN. Exit 0 is not a result; these are.
           expect_out() {
-            if ! printf '%s\n' "$MATRIX_OUT" | grep -Eq -- "$1"; then
+            # Do not pipe a producer into short-circuiting `grep -q` while pipefail is active:
+            # after a match, grep may close early and make the producer's SIGPIPE turn the whole
+            # pipeline nonzero. Match the stable captured-output file directly instead.
+            if ! grep -Eq -- "$1" "$MATRIX_OUT_FILE"; then
               echo "::error::packaged matrix: $2"
               printf '%s\n' "$MATRIX_OUT"
               exit 1
@@ -945,7 +952,9 @@ jobs:
           }
 
           refute_canary() {
-            if printf '%s\n' "$MATRIX_OUT" | grep -qF -- "$MATRIX_CANARY"; then
+            # The same no-pipeline rule is security-relevant here: SIGPIPE must never turn a
+            # present secret into a false negative.
+            if grep -qF -- "$MATRIX_CANARY" "$MATRIX_OUT_FILE"; then
               echo "::error::packaged matrix: $1"
               exit 1
             fi
@@ -1415,3 +1424,157 @@ jobs:
             exit 1
           fi
           npm publish "$TARBALL" --provenance --access public
+
+  mcp-registry:
+    # Registry metadata is a SECOND immutable publication, deliberately isolated from npm. If
+    # registry authentication or validation fails after npm accepted the package, this job can be
+    # retried without attempting to publish the same npm version again. It begins only after the
+    # protected npm job succeeds, then proves that the public package carries the exact mcpName
+    # the checked-in manifest declares before any registry write is attempted.
+    needs: [preflight, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: mcp-production
+      url: https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.sthayi-ai%2Fsthayi
+    concurrency:
+      group: mcp-production-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # short-lived GitHub OIDC identity for the io.github.sthayi-ai namespace
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Prove the published npm package carries the registry identity
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_MCP_NAME: io.github.sthayi-ai/sthayi
+        run: |
+          # npm may need a short propagation window after accepting a new version. The bound is
+          # explicit: no stale or missing identity is treated as success, and a retry of THIS job
+          # never re-enters the immutable npm publish step.
+          for ATTEMPT in $(seq 1 12); do
+            PUBLISHED_VERSION="$(npm view "sthayi@${VERSION}" version 2>/dev/null || true)"
+            PUBLISHED_MCP_NAME="$(npm view "sthayi@${VERSION}" mcpName 2>/dev/null || true)"
+            if [ "$PUBLISHED_VERSION" = "$VERSION" ] && [ "$PUBLISHED_MCP_NAME" = "$EXPECTED_MCP_NAME" ]; then
+              printf 'npm identity verified: sthayi@%s -> %s\n' "$VERSION" "$EXPECTED_MCP_NAME"
+              break
+            fi
+            if [ "$ATTEMPT" -eq 12 ]; then
+              echo "::error::sthayi@${VERSION} did not expose mcpName=${EXPECTED_MCP_NAME} within the bounded propagation window (version='${PUBLISHED_VERSION}', mcpName='${PUBLISHED_MCP_NAME}')"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Install the checksum-pinned MCP publisher
+        env:
+          MCP_PUBLISHER_VERSION: 1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          INSTALL_DIR="$RUNNER_TEMP/mcp-publisher-install"
+          ARCHIVE="$RUNNER_TEMP/mcp-publisher_linux_amd64.tar.gz"
+          mkdir "$INSTALL_DIR"
+          curl --fail --location --silent --show-error \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            --output "$ARCHIVE"
+          printf '%s  %s\n' "$MCP_PUBLISHER_SHA256" "$ARCHIVE" | sha256sum --check --strict
+          tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" mcp-publisher
+          PUBLISHER_VERSION="$($INSTALL_DIR/mcp-publisher --version 2>&1)"
+          printf '%s\n' "$PUBLISHER_VERSION"
+          if ! printf '%s\n' "$PUBLISHER_VERSION" | grep -F "mcp-publisher ${MCP_PUBLISHER_VERSION} (" >/dev/null; then
+            echo "::error::downloaded MCP publisher did not report pinned version ${MCP_PUBLISHER_VERSION}"
+            exit 1
+          fi
+          echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+
+      - name: Publish idempotently over GitHub OIDC and verify the complete immutable record
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_MCP_NAME: io.github.sthayi-ai/sthayi
+        run: |
+          RESPONSE_FILE="$RUNNER_TEMP/mcp-registry-response.json"
+          REGISTRY_URL="https://registry.modelcontextprotocol.io/v0.1/servers/io.github.sthayi-ai%2Fsthayi/versions/${VERSION}"
+
+          # Return 0 only for the exact immutable record, 1 for a definite 404, 2 for a transient
+          # transport/API failure, and 3 for a record at this name+version whose bytes cannot be
+          # corrected in place. The response's top-level _meta is Registry-owned; `.server` must be
+          # JSON-equal to the checked-in manifest in full.
+          fetch_exact_record() {
+            if ! HTTP_CODE="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --output "$RESPONSE_FILE" --write-out '%{http_code}' "$REGISTRY_URL")"; then
+              echo "::warning::MCP Registry request failed before returning an HTTP status"
+              return 2
+            fi
+            if [ "$HTTP_CODE" = 404 ]; then
+              return 1
+            fi
+            if [ "$HTTP_CODE" != 200 ]; then
+              echo "::warning::MCP Registry returned HTTP ${HTTP_CODE}"
+              return 2
+            fi
+            if ! jq --exit-status --slurpfile expected packages/cli/server.json \
+              '.server == $expected[0]' "$RESPONSE_FILE" >/dev/null; then
+              echo "::error::${EXPECTED_MCP_NAME}@${VERSION} already exists with metadata that differs from packages/cli/server.json"
+              jq --null-input --slurpfile expected packages/cli/server.json \
+                --slurpfile actual "$RESPONSE_FILE" \
+                '{expected: $expected[0], actual: $actual[0].server}'
+              return 3
+            fi
+            return 0
+          }
+
+          PREEXISTING=false
+          for ATTEMPT in $(seq 1 12); do
+            if fetch_exact_record; then
+              PREEXISTING=true
+              printf 'MCP Registry already holds the exact immutable record: %s@%s\n' "$EXPECTED_MCP_NAME" "$VERSION"
+              break
+            else
+              STATUS=$?
+            fi
+            if [ "$STATUS" -eq 1 ]; then
+              break
+            fi
+            if [ "$STATUS" -eq 3 ]; then
+              exit 1
+            fi
+            if [ "$ATTEMPT" -eq 12 ]; then
+              echo "::error::could not determine whether ${EXPECTED_MCP_NAME}@${VERSION} already exists; refusing a possibly duplicate publication"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          PUBLISH_STATUS=0
+          if [ "$PREEXISTING" = false ]; then
+            timeout 120s mcp-publisher login github-oidc
+            timeout 120s mcp-publisher publish packages/cli/server.json || PUBLISH_STATUS=$?
+            if [ "$PUBLISH_STATUS" -ne 0 ]; then
+              echo "::warning::mcp-publisher exited ${PUBLISH_STATUS}; checking whether the exact record nevertheless became durable"
+            fi
+          fi
+
+          for ATTEMPT in $(seq 1 12); do
+            if fetch_exact_record; then
+              printf 'MCP Registry verified: %s@%s\n' "$EXPECTED_MCP_NAME" "$VERSION"
+              exit 0
+            else
+              STATUS=$?
+            fi
+            if [ "$STATUS" -eq 3 ]; then
+              exit 1
+            fi
+            if [ "$ATTEMPT" -eq 12 ]; then
+              echo "::error::MCP Registry did not return the exact ${EXPECTED_MCP_NAME}@${VERSION} record within the bounded propagation window (publisher status ${PUBLISH_STATUS})"
+              exit 1
+            fi
+            sleep 10
+          done

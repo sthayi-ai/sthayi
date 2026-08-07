@@ -85,9 +85,11 @@ describe('safety: a removal that cannot be counted leaves no authority behind', 
    */
   const IN_PROCESS_OVER_CAP = 8193;
 
-  // Both over-cap probes create and retire 8,193 directories. Hosted Windows exceeded Vitest's
-  // 5 s default on those two workloads, so only those tests receive this measured headroom.
-  const OVER_CAP_TEST_TIMEOUT_MS = 20_000;
+  // Both over-cap probes create and retire 8,193 directories. Hosted Windows is substantially
+  // slower at this exact filesystem workload: on Node 24, each of the two probes independently
+  // crossed 20 s while the same SHA passed everywhere else. Only these two tests receive the
+  // measured Windows headroom; no product timeout or assertion is softened.
+  const OVER_CAP_TEST_TIMEOUT_MS = process.platform === 'win32' ? 40_000 : 20_000;
   const CHILD_OVER_CAP_TEST =
     'a recursive removal WIDER THAN THE CENSUS leaves zero authority for what it destroyed';
   const IN_PROCESS_OVER_CAP_TEST =
