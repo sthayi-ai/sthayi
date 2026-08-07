@@ -1,0 +1,24 @@
+{
+ "conversation_turns": [
+  {
+   "user_turn": {
+    "prompt": "Summarize my widget project preferences",
+    "turn_index": 0,
+    "turn_last_modified": "2026-02-10T12:00:00.000000+00:00"
+   }
+  },
+  {
+   "system_turn": {
+    "citations": [],
+    "text": [
+     { "data": "", "preamble": "You prefer TypeScript, pnpm, and vitest for the widget CLI, and you deploy on Fridays." }
+    ],
+    "turn_index": 1,
+    "turn_last_modified": "2026-02-10T12:00:00.000000+00:00"
+   }
+  }
+ ],
+ "creation_time": "2026-02-10T12:00:00.000000+00:00",
+ "last_modification_time": "2026-02-10T12:00:00.000000+00:00",
+ "title": "Widget project preferences"
+}

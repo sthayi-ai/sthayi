@@ -1,0 +1,17 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "p",
+        "content": "The user is a civil engineer."
+      },
+      {
+        "id": "q",
+        "content": "The user enjoys hiking on weekends."
+      }
+    ]
+  },
+  "expect": {
+    "empty": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "e2",
+        "content": "Told the assistant yesterday that I use dark mode everywhere and dislike light themes."
+      }
+    ]
+  },
+  "expect": {
+    "promote": ["e2"]
+  }
+}

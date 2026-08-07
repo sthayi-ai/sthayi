@@ -1,0 +1,13 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "e1",
+        "content": "In our chat I mentioned I always enable TypeScript strict mode on new projects."
+      }
+    ]
+  },
+  "expect": {
+    "promote": ["e1"]
+  }
+}

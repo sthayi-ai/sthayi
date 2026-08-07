@@ -1,0 +1,30 @@
+{
+  "name": "@sthayi/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sthayi core — browser-clean domain logic (memory, store port, journal hash-chain, search, vault, consolidate).",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": { "node": "22.x || 24.x" },
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "ulid": "^2.3.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

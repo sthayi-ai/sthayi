@@ -1,0 +1,1417 @@
+# Release pipeline: tag-first, artifact-identity-proving.
+#
+#   The ONLY trigger is pushing an existing vX.Y.Z tag. Preflight asserts the tag is a plain
+#   semver tag, equals packages/cli/package.json "version", and is reachable from the default
+#   branch. The build job builds ONCE, asserts `sthayi --version` == tag, packs ONCE — from a
+#   freshly staged tree, with NO package lifecycle — and checksums the tarball. Every downstream
+#   job consumes THAT artifact (checksum-verified):
+#     - smoke-install: npm-installs the packed tarball into a RETAINED, non-temp directory under
+#       $GITHUB_WORKSPACE and runs --version / --help / init --yes / doctor against an isolated
+#       HOME, then asserts the MCP server's serverInfo.version over a real stdio initialize
+#       handshake. After that it removes the release tarball and the npm cache — and NOTHING
+#       else — and proves both launchers still work: `$HOME/.sthayi/bin/sthayi --version` and an
+#       MCP initialize through `$HOME/.sthayi/bin/sthayi-mcp`, each still pinned at the
+#       installation that is still standing. Every supported Node leg (22 and 24).
+#     - freshtest-docker: fresh-install of the exact tarball in a clean Node 22 container.
+#       Docker unavailable => the release FAILS (no silent DEFERRED success).
+#     - draft-release: attaches the tarball + SHA256SUMS to a draft GitHub release.
+#     - publish: waits for approval in the protected `npm-production` environment, then
+#       publishes the exact gated tarball file with npm provenance. It NEVER rebuilds.
+#   There is no workflow_dispatch publish path: no publishing of arbitrary refs.
+#
+# Version identity: packages/cli/src/version.ts is the single source of truth (CLI --version and
+# MCP serverInfo.version both import it); version.test.ts pins it to package.json so drift fails
+# `pnpm verify` before it can reach this pipeline.
+#
+# Trust posture: no third-party actions beyond actions/*, minimal permissions per job, workflow
+# values enter shell only via env: blocks (never direct ${{ }} interpolation in run: scripts),
+# checksums published and re-verified before every consume/publish.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    # Tag identity: vX.Y.Z shape, tag == package.json version, tag reachable from the default branch.
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history + branches: needed for the reachability check
+
+      - name: Assert tag shape is vX.Y.Z
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag '$TAG' is not a plain vX.Y.Z release tag"
+            exit 1
+          fi
+
+      - name: Assert tag == packages/cli/package.json version
+        id: meta
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "$TAG" != "v$PKG_VERSION" ]; then
+            echo "::error::tag '$TAG' != package version 'v$PKG_VERSION' (packages/cli/package.json)"
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Assert tag is reachable from the default branch
+        env:
+          TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          TAG_COMMIT="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            echo "::error::tag '$TAG' ($TAG_COMMIT) is not reachable from '$DEFAULT_BRANCH' — releases publish only merged history"
+            exit 1
+          fi
+
+  build:
+    # Build ONCE, pack ONCE, run NO package lifecycle. Everything downstream consumes this job's
+    # artifact.
+    #
+    # THE PACK IS THE TRUST BOUNDARY OF THIS JOB. `npm pack` in the package checkout executes
+    # `prepack` — arbitrary code, holding write access to the checkout and to `$RUNNER_TEMP`, running
+    # in between the release contract being captured and the archive being read. One script can
+    # rewrite `dist/index.js` and recompute that file's contracted digest, and the contents gate then
+    # reports "byte-identical" about a substitute it compared to itself. So the release stages a NEW
+    # tree holding exactly what the package publishes, settles it against the contract, packs THAT
+    # once with `--ignore-scripts`, and pins the contract and the enforcing scripts into the workflow
+    # control plane beforehand so a change to any of them across the pack boundary stops the release
+    # BEFORE the gate is asked for a verdict. There is no live-tree fallback and no second pack.
+    #
+    # THE DIGEST OF THAT ARTIFACT LEAVES THIS JOB AS A JOB OUTPUT, and that is the release's only
+    # authority on what the tarball is. A digest re-read downstream from a FILE — even one whose
+    # checksum was verified a moment earlier — is a statement about a mutable pathname: replace
+    # both the tarball and the manifest that covers it and every file-derived expectation moves
+    # with them, so the substitute is compared to itself and passes. A job output is fixed by the
+    # workflow control plane when this job ends; no later write on any runner can change it.
+    needs: preflight
+    runs-on: ubuntu-latest
+    outputs:
+      tarball-name: ${{ steps.checksums.outputs.tarball-name }}
+      tarball-sha256: ${{ steps.checksums.outputs.tarball-sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # SETUP-NODE FIRST, AND NOTHING REACHES FOR pnpm BEFORE IT. `corepack enable` ahead of this
+      # step runs against whatever Node the runner image happens to carry — an image without
+      # Corepack ends the release before it has a toolchain. `cache: pnpm` is gone with it:
+      # setup-node resolves the pnpm store by RUNNING pnpm, the binary the next step installs.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install pnpm (the exact packageManager version, via npm)
+        shell: bash
+        run: |
+          RAW="$(node -p "require('./package.json').packageManager")"
+          case "$RAW" in
+            pnpm@*) EXPECTED="${RAW#pnpm@}" ;;
+            *) echo "::error::package.json packageManager is '$RAW', not a pnpm@x.y.z pin"; exit 1 ;;
+          esac
+          if ! printf '%s' "$EXPECTED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::packageManager pins '$EXPECTED', which is not an exact x.y.z version"
+            exit 1
+          fi
+          npm install --global "pnpm@$EXPECTED"
+          # The release builds with the pinned package manager or it does not build: a different
+          # pnpm resolves a different tree than the lockfile describes, and the tarball is the
+          # artifact people install.
+          GOT="$(pnpm --version)"
+          if [ "$GOT" != "$EXPECTED" ]; then
+            echo "::error::pnpm --version is '$GOT', expected exactly '$EXPECTED' (package.json packageManager)"
+            exit 1
+          fi
+          echo "pnpm $GOT bootstrapped on Node $(node --version)"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit gate (production dependencies)
+        run: pnpm audit --prod --audit-level moderate
+
+      - name: Verify (lint + typecheck + tests incl. safety gate + version-identity test)
+        run: pnpm verify
+
+      - name: Build
+        run: pnpm build
+
+      - name: Assert built CLI --version == tag version
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          BUILT="$(node packages/cli/dist/index.js --version)"
+          if [ "$BUILT" != "$VERSION" ]; then
+            echo "::error::built CLI --version '$BUILT' != tag version '$VERSION'"
+            exit 1
+          fi
+
+      - name: Capture the pre-pack release contract
+        # THE ORDER OF THIS STEP IS THE CONTROL. `npm pack` runs the package lifecycle unless it is
+        # told not to, and a `prepack` script is arbitrary code with write access to this checkout.
+        # A contents gate that derives its expectations from the working tree AFTER the pack is
+        # therefore comparing the archive to whatever that code decided the working tree should say:
+        # rewrite `dist/index.js` and the file it is checked against in the same script and the
+        # substitute is compared to itself and passes.
+        #
+        # So the contract is captured HERE — after the build the `Verify` step's tests ran against
+        # and after the built CLI answered with the tag version, and BEFORE anything packs. It
+        # records the exact `dist/` and `prompts/` trees (path set AND sha256 of every file),
+        # `README.md`, `LICENSE`, and the manifest's runtime and security fields.
+        #
+        # WRITING IT UNDER `$RUNNER_TEMP` DOES NOT MAKE IT IMMUTABLE. That directory is ordinary
+        # runner state, writable by anything that runs afterwards on this machine — including a
+        # package lifecycle script, which inherits `RUNNER_TEMP` from the step that invokes it. A
+        # `prepack` can rewrite a packed file AND recompute this file's digest for it in one go,
+        # after which the contents gate compares a substitute to itself. Two things close that, and
+        # both are below: the pack runs NO lifecycle at all, and the bytes of this file are pinned
+        # into the workflow control plane before the pack and re-asserted after it.
+        run: node scripts/verify-tarball-contents.mjs --snapshot "$RUNNER_TEMP/release-contract.json"
+
+      - name: Pin the release authority (contract + the scripts that enforce it)
+        id: authority
+        # THE THREE BYTE SETS THIS RELEASE'S VERDICT RESTS ON, FIXED BY THE CONTROL PLANE.
+        #
+        # The contract says what the archive must be. The verifier decides whether it is. The stager
+        # decides what gets packed at all. All three live on a mutable runner, so a green verdict is
+        # only worth what those bytes were AT CAPTURE TIME — and every one of them can be rewritten
+        # by anything that runs afterwards, a package lifecycle script included.
+        #
+        # A step output is not a file. GitHub reads `$GITHUB_OUTPUT` when THIS step ends and fixes
+        # `steps.authority.outputs.*` in the workflow context; later steps write their own output
+        # file, and nothing on the runner can reach back and change these values. That is the same
+        # authority the tarball digest leaves this job with, taken one step earlier, and it is what
+        # makes the re-assertion after the pack a comparison against something rather than a
+        # comparison of the runner to itself.
+        run: |
+          set -euo pipefail
+          # Both spellings exist because this fragment is exercised off-runner by
+          # tests/safety/tarball-contents-gate.test.ts, on machines that ship one or the other.
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha_of() { sha256sum "$1" | cut -d ' ' -f 1; }
+          else
+            sha_of() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+          fi
+          pin() {
+            if [ ! -f "$1" ]; then
+              echo "::error::$1 is missing — the release has no authority to pin"
+              exit 1
+            fi
+            SHA="$(sha_of "$1")"
+            if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::could not compute a sha256 for $1 (got '$SHA')"
+              exit 1
+            fi
+            echo "$2=$SHA" >> "$GITHUB_OUTPUT"
+            echo "pinned $1 = $SHA"
+          }
+          pin "$RUNNER_TEMP/release-contract.json" contract-sha256
+          pin scripts/verify-tarball-contents.mjs verifier-sha256
+          pin scripts/stage-release-package.mjs stager-sha256
+
+      - name: Stage the release package (a new tree, settled against the contract)
+        # WHAT GETS PACKED IS BUILT HERE, NOT FOUND. The checkout is a working tree: it carries a
+        # `src/`, a `node_modules/`, a `scripts/` and whatever the build left behind, and `npm pack`
+        # run inside it decides what to publish from a `files` allowlist plus a lifecycle script.
+        # This step instead creates a NEW directory holding exactly the five things the package
+        # publishes — the approved `package.json`, the built `dist` tree, the `prompts` pack, the
+        # repo-root `README.md` and `LICENSE` — and settles every byte of it against the contract
+        # captured above, in BOTH directions: a contracted file that is missing fails, and a file the
+        # contract does not hold is debris and fails too.
+        #
+        # It is created fresh (`mkdir`, never `mkdir -p`), so nothing a previous run or a previous
+        # step left at that path can be swept into the archive.
+        run: |
+          node scripts/stage-release-package.mjs \
+            --contract "$RUNNER_TEMP/release-contract.json" \
+            --out "$RUNNER_TEMP/release-stage"
+
+      - name: Pack (exactly once, running NO package lifecycle)
+        # `--ignore-scripts`, AND FROM THE STAGE. Those two together are the fix.
+        #
+        # `npm pack` in `packages/cli` runs `prepack`, which is arbitrary code holding write access
+        # to the checkout and to `$RUNNER_TEMP`, executing BETWEEN the contract capture and the
+        # archive being read. That is enough to rewrite `dist/index.js` and recompute the contract's
+        # digest for it in the same script: the contents gate then reports "byte-identical", and the
+        # canary — which perturbs a DIFFERENT contracted digest — still reports that the comparison
+        # is load-bearing. CI says "canary OK" about a compromised artifact.
+        #
+        # So the release pack executes no lifecycle at all. There is exactly one pack, it reads the
+        # staging tree the step above built and settled, and it writes into a directory of its own —
+        # never into the tree being packed, and never into the mutable package checkout. There is no
+        # live-tree fallback: if the stage did not settle, nothing packs.
+        #
+        # AND THAT DIRECTORY IS NEW. Every step after this one names a path inside it — the scan, the
+        # uploaded artifact, the draft release — so whatever else is in it is part of what this
+        # release publishes. It is created with plain `mkdir` and an existing directory ends the job.
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          # THE OUTPUT DIRECTORY IS CREATED FRESH OR THE RELEASE STOPS. `mkdir -p` succeeds on a
+          # directory that is already there, which makes reuse invisible: anything a previous step,
+          # an untrusted action, or a previous run on a reused runner left at this path would sit
+          # beside the archive this release packs, inside the directory every later step names.
+          # Plain `mkdir` fails on EEXIST, and that failure is the refusal.
+          if ! mkdir "$RUNNER_TEMP/release-pack"; then
+            echo "::error::$RUNNER_TEMP/release-pack already exists — the release output directory is created fresh, never reused"
+            exit 1
+          fi
+          (cd "$RUNNER_TEMP/release-stage" && npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/release-pack")
+          if [ ! -f "$RUNNER_TEMP/release-pack/sthayi-${VERSION}.tgz" ]; then
+            echo "::error::npm pack did not produce sthayi-${VERSION}.tgz"
+            exit 1
+          fi
+
+      - name: Assert the pinned release authority survived the pack
+        # BEFORE THE GATE RUNS, NOT AFTER IT REPORTS. A verifier that was rewritten between the
+        # capture and this point can print whatever it likes, and a contract that was rewritten makes
+        # every byte comparison a comparison of the substitute to itself. The expectation for both
+        # therefore comes from the workflow context — fixed when the `authority` step ended — and not
+        # from any file on this runner.
+        #
+        # THIS CHECK IS INLINE SHELL ON PURPOSE. Delegating it to a repository script would put the
+        # comparison inside one of the byte sets being compared, which is not a check.
+        env:
+          CONTRACT_SHA: ${{ steps.authority.outputs.contract-sha256 }}
+          VERIFIER_SHA: ${{ steps.authority.outputs.verifier-sha256 }}
+          STAGER_SHA: ${{ steps.authority.outputs.stager-sha256 }}
+        run: |
+          # Both spellings exist because this fragment is exercised off-runner by
+          # tests/safety/tarball-contents-gate.test.ts, on machines that ship one or the other.
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha_of() { sha256sum "$1" | cut -d ' ' -f 1; }
+          else
+            sha_of() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+          fi
+          assert_pinned() {
+            if ! printf '%s' "$2" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::no pinned digest for $1 — this release has nothing immutable to compare to"
+              exit 1
+            fi
+            if [ ! -f "$1" ]; then
+              echo "::error::$1 is gone — the release authority did not survive the pack"
+              exit 1
+            fi
+            GOT="$(sha_of "$1")"
+            if [ "$GOT" != "$2" ]; then
+              echo "::error::$1 ($GOT) is not the byte set this release pinned before the pack ($2) — the authority changed across the pack boundary"
+              exit 1
+            fi
+          }
+          assert_pinned "$RUNNER_TEMP/release-contract.json" "$CONTRACT_SHA"
+          assert_pinned scripts/verify-tarball-contents.mjs "$VERIFIER_SHA"
+          assert_pinned scripts/stage-release-package.mjs "$STAGER_SHA"
+          echo "release authority intact across the pack boundary"
+
+      - name: Verify packed tarball contents
+        # AGAINST THE ARCHIVE THAT WAS JUST PACKED, AND BEFORE ANYTHING ELSE TOUCHES IT. The
+        # digest below fixes what this release IS; this step is what decides whether that is worth
+        # fixing. It runs on the one real pack — nothing here rebuilds, repacks, or runs the
+        # package lifecycle at all — so what it inspects is the file the checksum covers, the
+        # artifact upload carries, and the publish job hands to npm.
+        #
+        # A `files` allowlist that stops shipping a prompt, an asset or an entry point is invisible
+        # to every source-driven test in this repo: the file is on the developer's disk and absent
+        # from the user's install. scripts/verify-tarball-contents.mjs derives what has to be in
+        # the archive from the package manifest and the CLI source, so the requirement follows the
+        # code instead of a list someone remembers to update, and refuses source, credentials and
+        # repository documentation on the way out.
+        #
+        # AGAINST THE CONTRACT CAPTURED BEFORE THE PACK, never against the tree the pack left
+        # behind. `dist/` and `prompts/` are settled as EXACT trees — same path set, same bytes —
+        # so a substituted entry point, an extra module, and an extra `prompts/fixtures/<op>/*.json`
+        # (which `loadFixtures` would execute) are all refused rather than read as "nothing
+        # missing". The packed `package.json` is parsed as strict UTF-8 and settled field by field
+        # against the captured manifest, and every entry point the PACKED manifest names must be in
+        # the archive, so a manifest that repoints `bin` or adds an install-time hook fails here.
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          node scripts/verify-tarball-contents.mjs \
+            "$RUNNER_TEMP/release-pack/sthayi-${VERSION}.tgz" \
+            --contract "$RUNNER_TEMP/release-contract.json"
+
+      - name: Release-contract canary (a post-capture mutation must be refused)
+        # The gate above is only worth its green if the comparison behind it is load-bearing. This
+        # runs the SAME verifier over the SAME archive against COPIES of the contract with one
+        # recorded digest flipped, and requires a refusal for each. It never touches the real
+        # contract or the real tarball, and it packs nothing.
+        #
+        # TWO THINGS MAKE IT MEAN SOMETHING, AND BOTH WERE MISSING.
+        #
+        #   1. IT RE-ASSERTS THE PINNED CONTRACT FIRST. A canary derived from a contract that was
+        #      itself rewritten is a statement about the rewrite: flip one digest in a doctored
+        #      contract, watch the verifier refuse it, and report that the gate is honest — while the
+        #      gate has just blessed the archive the doctored contract was written to fit. The
+        #      perturbation is only evidence if the thing perturbed is the authority this release
+        #      pinned before it packed.
+        #
+        #   2. IT PERTURBS THE ENTRY POINT, not whatever sorts first. The old canary flipped
+        #      `Object.keys(c.files).sort()[0]` — `LICENSE` — so a substituted `dist/index.js` and a
+        #      contract recomputed to match it produced a green gate AND a green canary in the same
+        #      run: the canary demonstrated that a comparison it was not being asked about still
+        #      worked. The entry point is what a substitution targets, so it is what the control
+        #      perturbs; the first-sorted entry is kept as well, so the old evidence is not lost.
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CONTRACT_SHA: ${{ steps.authority.outputs.contract-sha256 }}
+        run: |
+          set -euo pipefail
+          if command -v sha256sum > /dev/null 2>&1; then
+            sha_of() { sha256sum "$1" | cut -d ' ' -f 1; }
+          else
+            sha_of() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+          fi
+          if [ "$(sha_of "$RUNNER_TEMP/release-contract.json")" != "$CONTRACT_SHA" ]; then
+            echo "::error::the release contract is not the byte set pinned before the pack — a canary derived from it would be evidence about a rewritten authority, not about this release"
+            exit 1
+          fi
+          PERTURB="$RUNNER_TEMP/canary-perturb.mjs"
+          cat > "$PERTURB" <<'EOF'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const [src, outDir] = process.argv.slice(2);
+          const c = JSON.parse(fs.readFileSync(src, 'utf8'));
+          const bin = c.manifest?.bin;
+          const entries = [
+            ...(bin !== null && typeof bin === 'object' && !Array.isArray(bin)
+              ? Object.values(bin)
+              : []),
+            c.manifest?.main,
+          ].filter((p) => typeof p === 'string' && c.files?.[p] !== undefined);
+          if (entries.length === 0) {
+            console.error(
+              '::error::the release contract names no entry point it also carries bytes for — the canary would perturb nothing the artifact runs',
+            );
+            process.exit(1);
+          }
+          const keys = [...new Set([...entries, Object.keys(c.files).sort()[0]])];
+          const flipped = '0'.repeat(64);
+          keys.forEach((k, i) => {
+            if (c.files[k] === flipped) {
+              console.error(`::error::the contracted digest of ${k} is already the perturbed value`);
+              process.exit(1);
+            }
+            const copy = JSON.parse(fs.readFileSync(src, 'utf8'));
+            copy.files[k] = flipped;
+            const dest = path.join(outDir, `release-contract.canary.${i}.json`);
+            fs.writeFileSync(dest, JSON.stringify(copy));
+            console.log(`${k} ${dest}`);
+          });
+          EOF
+          node "$PERTURB" "$RUNNER_TEMP/release-contract.json" "$RUNNER_TEMP" > "$RUNNER_TEMP/canary-list"
+          if [ ! -s "$RUNNER_TEMP/canary-list" ]; then
+            echo "::error::the canary produced no perturbed contract — it would prove nothing"
+            exit 1
+          fi
+          while read -r KEY CANARY; do
+            if node scripts/verify-tarball-contents.mjs "$RUNNER_TEMP/release-pack/sthayi-${VERSION}.tgz" --contract "$CANARY" > /dev/null 2>&1; then
+              echo "::error::the tarball-contents gate accepted an archive whose '$KEY' diverges from the captured release contract — the byte comparison is not load-bearing"
+              exit 1
+            fi
+            echo "canary OK for $KEY"
+            rm -f "$CANARY"
+          done < "$RUNNER_TEMP/canary-list"
+          rm -f "$PERTURB" "$RUNNER_TEMP/canary-list"
+          echo "release-contract canary OK: a divergence from the PINNED pre-pack contract is refused, entry point included"
+
+      - name: Checksums (and export the digest as this job's immutable output)
+        id: checksums
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          cd "$RUNNER_TEMP/release-pack"
+          TARBALL_NAME="sthayi-${VERSION}.tgz"
+          sha256sum "$TARBALL_NAME" > SHA256SUMS
+          cat SHA256SUMS
+          # The digest is taken HERE, from the bytes this job just packed, and carried out of the
+          # job by the control plane. Everything downstream compares against this value; nothing
+          # downstream re-derives an expectation from a file it can also be handed a forgery of.
+          SHA="$(sha256sum "$TARBALL_NAME" | cut -d ' ' -f 1)"
+          if ! printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::could not compute a sha256 for $TARBALL_NAME (got '$SHA')"
+            exit 1
+          fi
+          # WHAT ELSE IS IN THIS DIRECTORY IS PART OF WHAT THE RELEASE PUBLISHES, so it is
+          # enumerated rather than assumed. Naming the versioned tarball everywhere downstream stops
+          # an extra archive from being COLLECTED, but it would still leave one sitting in the
+          # release's own output directory, one edit to a path away from riding out with it. This is
+          # the delete-nothing, publish-nothing verdict on the whole directory: exactly the archive
+          # this job packed and the manifest it just wrote, and nothing else.
+          PACK_ENTRIES="$(LC_ALL=C ls -A | LC_ALL=C sort | tr '\n' ' ')"
+          if [ "$PACK_ENTRIES" != "SHA256SUMS $TARBALL_NAME " ]; then
+            echo "::error::refusing to publish — the release output directory holds '$PACK_ENTRIES', not exactly 'SHA256SUMS $TARBALL_NAME'"
+            exit 1
+          fi
+          echo "tarball-name=$TARBALL_NAME" >> "$GITHUB_OUTPUT"
+          echo "tarball-sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Scan tarball with VirusTotal (optional — runs only if the secret is set)
+        if: ${{ vars.VT_ENABLED == 'true' }}
+        continue-on-error: true
+        # THE SCAN NAMES THE ARCHIVE, IT DOES NOT SEARCH FOR ONE. `ls sthayi-*.tgz` reports whatever
+        # matches, in whatever order — a second archive beside the real one and the scan is a report
+        # about a file the release never packed, while the tarball that ships goes unscanned. The
+        # name comes from the checksums step's output, which is the same value every downstream gate
+        # compares against. Its response lands OUTSIDE the pack directory: this step is optional and
+        # `continue-on-error`, and the release's output directory does not gain files from it.
+        env:
+          VT_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+          TARBALL_NAME: ${{ steps.checksums.outputs.tarball-name }}
+        run: |
+          curl -s --fail https://www.virustotal.com/api/v3/files \
+            -H "x-apikey: $VT_API_KEY" \
+            -F "file=@$RUNNER_TEMP/release-pack/$TARBALL_NAME" | tee "$RUNNER_TEMP/vt-analysis.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sthayi-tarball-${{ needs.preflight.outputs.version }}
+          # TWO EXACT PATHS, NO GLOB. `sthayi-*.tgz` uploads whatever matches: a second archive left
+          # in the pack directory — by an earlier step, an untrusted action, or a reused runner —
+          # becomes a file inside this release's own artifact, and every job that downloads the
+          # artifact then has it on disk. The name is the one the checksums step pinned into the
+          # workflow context, which is the archive the contents gate settled and the digest covers.
+          # The step above has already refused to continue if this directory holds anything else.
+          path: |
+            ${{ runner.temp }}/release-pack/${{ steps.checksums.outputs.tarball-name }}
+            ${{ runner.temp }}/release-pack/SHA256SUMS
+          if-no-files-found: error
+
+  smoke-install:
+    # Install the EXACT packed tarball into a DURABLE, RETAINED project directory and exercise it
+    # against an isolated HOME, then prove the MCP server in that artifact reports the same version
+    # over a real stdio initialize handshake. Runs on every supported runtime — Node 22 and 24 —
+    # against the same gated artifact.
+    #
+    # WHY THE INSTALL DIRECTORY IS NOT A `mktemp -d`. `init` writes launchers that pin the CLI entry
+    # they were written from, and it REFUSES to pin an entry that lives in an npm/npx cache or under
+    # the system temp directory (packages/cli/src/clients/launcher.ts, isEphemeralPath) — such a pin
+    # breaks the moment the cache is pruned. A `mktemp -d` install is beneath `os.tmpdir()`, so
+    # `init --yes` below would refuse outright. The installation therefore lives under
+    # $GITHUB_WORKSPACE, which is exactly what a user's own durable install directory is, and the
+    # step below proves that against `os.tmpdir()` rather than assuming it.
+    #
+    # tests/safety/release-workflow-durability.test.ts fails the ordinary suite if the install
+    # location becomes a temp path, or if the teardown deletes the installation the launchers are
+    # pinned at.
+    name: smoke-install (Node ${{ matrix.node-version }})
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    # A BACKSTOP, not the enforcement. Every command in the packaged matrix below carries its own
+    # short per-command bound and reports a timeout as a timeout; this cap only guarantees that a
+    # wedge somewhere with no bound of its own still ends, instead of holding a release runner for
+    # the platform's six-hour default.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # THE COMPLETE SUPPORTED SET: `engines.node` admits Node 22 and 24 only, so the installed
+        # tarball is smoke-installed on both. A release that skips either has not tested the
+        # runtime contract it ships.
+        node-version: [22, 24]
+    steps:
+      # Checkout FIRST (it cleans the workspace): the packaged keyless matrix below imports
+      # tests/fixtures/imports/claude — the SAME export fixture the source-driven matrix uses, so
+      # the two layers differ only in which artifact they drive. Nothing here is on the install
+      # path; the CLI under test comes solely from the downloaded tarball.
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sthayi-tarball-${{ needs.preflight.outputs.version }}
+
+      - name: Tarball install smoke (durable install dir, isolated HOME)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SHA: ${{ needs.build.outputs.tarball-sha256 }}
+        run: |
+          # The digest comes from the build job's output, not from the manifest downloaded beside
+          # the tarball: a manifest replaced together with the artifact agrees with itself.
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::the build job published no usable tarball digest ('$EXPECTED_SHA')"
+            exit 1
+          fi
+          GOT_SHA="$(sha256sum "sthayi-${VERSION}.tgz" | cut -d ' ' -f 1)"
+          if [ "$GOT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::sthayi-${VERSION}.tgz ($GOT_SHA) is not the artifact the build job packed ($EXPECTED_SHA)"
+            exit 1
+          fi
+          TARBALL="$PWD/sthayi-${VERSION}.tgz"
+          # DURABLE and RETAINED for the whole job: the launchers written below pin their entry
+          # inside this directory and are then exercised with it still standing.
+          SMOKE_INSTALL_DIR="$GITHUB_WORKSPACE/sthayi-smoke-install"
+          SMOKE_HOME="$(mktemp -d)"   # the isolated $HOME only — never the installation
+          CHECK_SCRIPT="$GITHUB_WORKSPACE/mcp-version-check.mjs"
+
+          # Prove the install location is durable BY THE SAME MEASURE THE CLI USES, on this runner,
+          # rather than trusting that $GITHUB_WORKSPACE is never a temp path. A refusal here is a
+          # clear failure; the same condition reached `init` would surface as a launcher refusal.
+          SMOKE_INSTALL_DIR="$SMOKE_INSTALL_DIR" node -e '
+            const os = require("node:os");
+            const path = require("node:path");
+            const dir = path.resolve(process.env.SMOKE_INSTALL_DIR);
+            for (const tmp of new Set([os.tmpdir(), require("node:fs").realpathSync(os.tmpdir())])) {
+              const rel = path.relative(tmp, dir);
+              if (rel !== "" && !path.isAbsolute(rel) && !rel.startsWith("..")) {
+                console.error(`::error::smoke install dir ${dir} is under the system temp dir ${tmp} — sthayi init refuses to pin a launcher there`);
+                process.exit(1);
+              }
+            }
+            console.log(`smoke install dir is durable: ${dir} (os.tmpdir() is ${os.tmpdir()})`);
+          '
+
+          mkdir -p "$SMOKE_INSTALL_DIR"
+          cd "$SMOKE_INSTALL_DIR"
+          npm init -y > /dev/null
+          npm install "$TARBALL" > /dev/null
+          BIN="$SMOKE_INSTALL_DIR/node_modules/.bin/sthayi"
+
+          GOT="$(HOME="$SMOKE_HOME" "$BIN" --version)"
+          if [ "$GOT" != "$VERSION" ]; then
+            echo "::error::installed CLI --version '$GOT' != release version '$VERSION'"
+            exit 1
+          fi
+          HOME="$SMOKE_HOME" "$BIN" --help > /dev/null
+          HOME="$SMOKE_HOME" "$BIN" init --yes
+          HOME="$SMOKE_HOME" "$BIN" doctor
+
+          # MCP server version identity: initialize handshake against the installed artifact.
+          # Args after <expected> are passed to the spawned binary: the npm-installed CLI needs
+          # `serve`; the MCP launcher (below) forces `serve` itself and takes none.
+          cat > "$CHECK_SCRIPT" <<'EOF'
+          import { spawn } from 'node:child_process';
+          const [bin, expected, ...args] = process.argv.slice(2);
+          const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'inherit'] });
+          const timer = setTimeout(() => {
+            console.error('mcp version check: timed out waiting for initialize response');
+            child.kill();
+            process.exit(1);
+          }, 30000);
+          let out = '';
+          child.stdout.on('data', (chunk) => {
+            out += chunk;
+            const line = out.split('\n').find((l) => l.trim().startsWith('{'));
+            if (!line) return;
+            let msg;
+            try {
+              msg = JSON.parse(line);
+            } catch {
+              return; // partial line — keep buffering
+            }
+            clearTimeout(timer);
+            child.kill();
+            const got = msg?.result?.serverInfo?.version;
+            if (got !== expected) {
+              console.error(`MCP serverInfo.version '${got}' != release version '${expected}'`);
+              process.exit(1);
+            }
+            console.log(`MCP serverInfo.version OK: ${got}`);
+            process.exit(0);
+          });
+          child.on('exit', (code) => {
+            console.error(`mcp version check: server exited early (code ${code})`);
+            process.exit(1);
+          });
+          const initialize = {
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-06-18',
+              capabilities: {},
+              clientInfo: { name: 'release-gate', version: '0.0.0' },
+            },
+          };
+          child.stdin.write(`${JSON.stringify(initialize)}\n`);
+          EOF
+          HOME="$SMOKE_HOME" node "$CHECK_SCRIPT" "$BIN" "$VERSION" serve
+
+          # ── Launcher gate ────────────────────────────────────────────────────────────────
+          # `init` above wrote the two launchers, each pinned IN PLACE at the installation in
+          # $SMOKE_INSTALL_DIR. Sthayi copies no package anywhere: nothing is written under
+          # $SMOKE_HOME/.sthayi/runtime, and no launcher would survive that installation being
+          # removed. What the launchers DO survive is what a user actually hits — the release
+          # tarball and the npm cache going away — and that is what this gate removes.
+          cd /
+          rm -f "$TARBALL"
+          npm cache clean --force
+
+          # The installation the launchers are pinned at is still standing, and is what they run.
+          if [ ! -f "$SMOKE_INSTALL_DIR/node_modules/sthayi/package.json" ]; then
+            echo "::error::the pinned installation at $SMOKE_INSTALL_DIR was removed — the launchers below would prove nothing"
+            exit 1
+          fi
+
+          LAUNCHER_CLI="$SMOKE_HOME/.sthayi/bin/sthayi"
+          LAUNCHER_MCP="$SMOKE_HOME/.sthayi/bin/sthayi-mcp"
+          if [ ! -x "$LAUNCHER_CLI" ] || [ ! -x "$LAUNCHER_MCP" ]; then
+            echo "::error::init did not leave executable launchers at $SMOKE_HOME/.sthayi/bin"
+            exit 1
+          fi
+          # Each launcher must reference the durable installation itself — not a copy, and not a
+          # path in the cache that was just pruned.
+          for L in "$LAUNCHER_CLI" "$LAUNCHER_MCP"; do
+            if ! grep -qF "$SMOKE_INSTALL_DIR/node_modules/sthayi/" "$L"; then
+              echo "::error::$L is not pinned at the installation in $SMOKE_INSTALL_DIR"
+              cat "$L"
+              exit 1
+            fi
+          done
+          if [ -e "$SMOKE_HOME/.sthayi/runtime" ]; then
+            echo "::error::$SMOKE_HOME/.sthayi/runtime exists — sthayi copies no runtime into the home"
+            exit 1
+          fi
+
+          GOT_LAUNCHER="$(HOME="$SMOKE_HOME" "$LAUNCHER_CLI" --version)"
+          if [ "$GOT_LAUNCHER" != "$VERSION" ]; then
+            echo "::error::launcher CLI --version '$GOT_LAUNCHER' != release version '$VERSION' after the release tarball and the npm cache were removed"
+            exit 1
+          fi
+          # MCP initialize THROUGH the MCP launcher (it forces `serve` itself — no arg).
+          HOME="$SMOKE_HOME" node "$CHECK_SCRIPT" "$LAUNCHER_MCP" "$VERSION"
+
+          # Hand the installed binary to the packaged keyless matrix below. The installation is
+          # still standing (the launcher gate above proved it), and it is the ONLY sthayi on the
+          # next step's path — nothing there resolves a source build.
+          echo "PACKAGED_BIN=$BIN" >> "$GITHUB_ENV"
+          echo "PACKAGED_FIXTURE=$GITHUB_WORKSPACE/tests/fixtures/imports/claude" >> "$GITHUB_ENV"
+
+      - name: Packaged keyless matrix (every command, driven from the INSTALLED TARBALL)
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          # THE KEYLESS MATRIX, ON THE ARTIFACT USERS ACTUALLY INSTALL.
+          #
+          # Two layers exist because they prove different things and neither implies the other:
+          #   - Dockerfile.freshtest runs the FRESH-INSTALL SMOKE SUBSET (six commands) on a clean
+          #     machine with no toolchain, no repo and no cache. Breadth is not its job.
+          #   - THIS step runs EVERY registered command except the two provider-dependent ones,
+          #     against the npm-INSTALLED tarball rather than a source build — so it catches what a
+          #     source-driven matrix structurally cannot: a command whose prompt, asset or entry
+          #     point the package's `files` allowlist never shipped.
+          #
+          # AND IT ASSERTS OUTCOMES, NOT EXIT CODES. A CLI that answered `ok` to every command and
+          # exited 0 satisfies an invocation-only gate completely, so each command below is held to
+          # the result it is supposed to produce: the text it prints, the file it writes, the state
+          # the next command can see, and — for `init --dry-run`, `wire --dry-run` and
+          # `unwire --dry-run` — the bytes of the home it must NOT have changed.
+          #
+          # tests/safety/keyless-matrix.test.ts holds the SOURCE-BUILT CLI to the same outcomes.
+          # The two layers are deliberately aligned on what a correct command produces and are NOT
+          # a claim about provenance: one drives a build made out of the working tree, this one
+          # drives an npm installation of the packed artifact, and neither vouches for the other's
+          # bytes. tests/safety/packaged-keyless-matrix.test.ts gates THIS step three ways: the
+          # coverage ledger against the CLI's registered command list, the outcome phrases against
+          # the source-driven twin, and the shell itself EXECUTED against a stateful stand-in CLI,
+          # so every wrong or no-op behaviour is demonstrated to turn the gate red.
+          set -euo pipefail
+
+          # COVERAGE LEDGER — every registered command. Cross-checked against the CLI's COMMANDS
+          # list by the safety test, and re-checked at the end of this step against what actually
+          # ran, so an entry that is listed but never invoked fails the release.
+          PACKAGED_MATRIX_COMMANDS="init serve wire unwire status add search review import consolidate pack entities journal index rollback qualify doctor"
+
+          BIN="${PACKAGED_BIN:-}"
+          FIXTURE="${PACKAGED_FIXTURE:-}"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::packaged matrix: no installed CLI at '$BIN'"
+            exit 1
+          fi
+          if [ ! -d "$FIXTURE" ]; then
+            echo "::error::packaged matrix: no import fixture at '$FIXTURE'"
+            exit 1
+          fi
+          # A FRESH home, so this is a true zero-config run and not a continuation of the smoke
+          # step's state. The INSTALLATION is durable; only the home is temporary.
+          MATRIX_HOME="$(mktemp -d)"
+          MATRIX_HOME="$(cd "$MATRIX_HOME" && pwd -P)"
+          MATRIX_SCRATCH="$(mktemp -d)"
+          MATRIX_INVOKED="$MATRIX_SCRATCH/invoked"
+          MATRIX_OUT_FILE="$MATRIX_SCRATCH/out"
+          MATRIX_SEQ=0
+          : > "$MATRIX_INVOKED"
+
+          # A NEUTRAL WORKING DIRECTORY, holding nothing. The checkout is on this runner — the
+          # import fixture is read out of it by absolute path — and a CLI started INSIDE it can
+          # resolve a prompt, template or asset out of the source tree that the package never
+          # shipped. That is the exact defect this layer exists to catch, so no invocation here
+          # runs with the checkout, or anything else with contents, as its cwd.
+          MATRIX_CWD="$(mktemp -d)"
+          MATRIX_CWD="$(cd "$MATRIX_CWD" && pwd -P)"
+
+          # ── HERMETIC BY CONSTRUCTION: `env -i`, NOT A LIST SOMEONE REMEMBERED ────────────────
+          # An environment scrubbed by NAMING variables is only ever as good as the list, and a
+          # list is a snapshot: a provider redirect, a token, a credential or a HOME locator that
+          # nobody thought to name walks straight into client and config discovery, and the run
+          # stops being zero-config without saying so. `env -i` inverts the question — the child
+          # starts with NOTHING and receives exactly the variables named here — so a variable that
+          # is not on the list cannot leak by omission. Every HOME locator the CLI can consult is
+          # given an isolated value under this run's own throwaway home.
+          MATRIX_NODE_DIR="$(cd "$(dirname "$(command -v node)")" && pwd -P)"
+          MATRIX_PATH="$MATRIX_NODE_DIR:/usr/local/bin:/usr/bin:/bin"
+          MATRIX_STHAYI_HOME="$MATRIX_HOME/.sthayi"
+
+          run_packaged() {
+            ( cd "$MATRIX_CWD" && exec env -i \
+                PATH="$MATRIX_PATH" \
+                HOME="$MATRIX_HOME" \
+                STHAYI_HOME="$MATRIX_STHAYI_HOME" \
+                USERPROFILE="$MATRIX_HOME" \
+                APPDATA="$MATRIX_HOME/AppData/Roaming" \
+                LOCALAPPDATA="$MATRIX_HOME/AppData/Local" \
+                XDG_CONFIG_HOME="$MATRIX_HOME/.config" \
+                "$BIN" "$@" )
+          }
+
+          # ── EVERY INVOCATION IS BOUNDED, AND A TIMEOUT IS NOT AN ORDINARY FAILURE ────────────
+          # A gate that can hang does not fail fast: one wedged command would spend the job's whole
+          # allowance and report nothing about the artifact. The bound is enforced here rather than
+          # delegated to `timeout(1)`, which is coreutils and is absent from some of the machines
+          # this shell is exercised on — the gate must behave identically wherever it runs.
+          #
+          # WHICH OUTCOME HAPPENED IS DECIDED BY A FACT ON DISK, not by an exit status: the
+          # watchdog touches this invocation's own $MATRIX_TIMEOUT_FLAG before it signals, so
+          # "killed for exceeding the bound" and "exited nonzero on its own" are distinguishable,
+          # and a hang can never be reported as an ordinary failure (or, for the two documented
+          # exceptions, mistaken for the fast refusal they are required to give). The flag is named
+          # per invocation and never cleared: a marker that has to be RESET before each command is
+          # a marker that can be read after the reset and before the write.
+          MATRIX_CMD_TIMEOUT="${MATRIX_CMD_TIMEOUT:-120}"
+          case "$MATRIX_CMD_TIMEOUT" in
+            '' | *[!0-9]*)
+              echo "::error::packaged matrix: MATRIX_CMD_TIMEOUT must be a whole number of seconds"
+              exit 1
+              ;;
+          esac
+          if [ "$MATRIX_CMD_TIMEOUT" -lt 1 ] || [ "$MATRIX_CMD_TIMEOUT" -gt 600 ]; then
+            echo "::error::packaged matrix: MATRIX_CMD_TIMEOUT=${MATRIX_CMD_TIMEOUT}s is outside 1..600 — a per-command bound that outlives the job is not a bound"
+            exit 1
+          fi
+
+          # ── WHAT GETS RETIRED IS THE PROCESS GROUP, NEVER THE WRAPPER ───────────────────────
+          # `cmd &` starts a SHELL that then execs the installed CLI, so the pid `$!` names is a
+          # wrapper and the CLI is its descendant. `kill $!` retires the wrapper and leaves the CLI
+          # — and everything the CLI started — running: still holding this run's isolated home,
+          # still writing into the output file the NEXT command is about to be judged by. The job
+          # is therefore given a process group of its own (`set -m`: monitor mode makes the job's
+          # pid its pgid) and every signal below is sent to `-$pid`, which is the whole group at
+          # once. `setsid` would say the same thing and is absent from some of the machines this
+          # shell is exercised on; monitor mode is in every bash. Monitor mode is switched on only
+          # across the fork, so nothing else in the step acquires job-control behaviour, and a
+          # backgrounded process group must not read a controlling terminal (this step's stdin is
+          # never one, on a runner or under the safety test's harness).
+          group_retired() {
+            i=0
+            while [ "$i" -lt 5 ]; do
+              kill -KILL "-$1" 2>/dev/null || true
+              # ESRCH — nothing left in the group — is the answer this is looking for. A process
+              # that has just been killed is a zombie until its new parent reaps it, so a single
+              # look is not an answer and this one is taken up to five times.
+              kill -0 "-$1" 2>/dev/null || return 0
+              sleep 1
+              i=$((i + 1))
+            done
+            return 1
+          }
+
+          bounded() {
+            MATRIX_SEQ=$((MATRIX_SEQ + 1))
+            MATRIX_TIMEOUT_FLAG="$MATRIX_SCRATCH/timed-out.$MATRIX_SEQ"
+            set -m
+            "$@" &
+            MATRIX_CMD_PID=$!
+            set +m
+            (
+              i=0
+              while [ "$i" -lt "$MATRIX_CMD_TIMEOUT" ]; do
+                sleep 1
+                kill -0 "$MATRIX_CMD_PID" 2>/dev/null || exit 0
+                i=$((i + 1))
+              done
+              : > "$MATRIX_TIMEOUT_FLAG"
+              kill -TERM "-$MATRIX_CMD_PID" 2>/dev/null || true
+              sleep 2
+              kill -KILL "-$MATRIX_CMD_PID" 2>/dev/null || true
+            ) &
+            MATRIX_WATCHDOG_PID=$!
+            MATRIX_RC=0
+            wait "$MATRIX_CMD_PID" || MATRIX_RC=$?
+            kill "$MATRIX_WATCHDOG_PID" 2>/dev/null || true
+            wait "$MATRIX_WATCHDOG_PID" 2>/dev/null || true
+            # `wait` returns when the LEADER is reaped, which says nothing about what the leader
+            # left behind. The group is swept here — on EVERY command, not only on the timeout
+            # path — and the sweep is then proved, because a survivor of one command is an
+            # unaccounted process writing into the next one's evidence.
+            if ! group_retired "$MATRIX_CMD_PID"; then
+              echo "::error::packaged matrix: a process started by the installed CLI outlived its invocation and could not be retired"
+              exit 1
+            fi
+            return "$MATRIX_RC"
+          }
+
+          timed_out() { [ -f "$MATRIX_TIMEOUT_FLAG" ]; }
+
+          keyless() {
+            printf '%s\n' "$1" >> "$MATRIX_INVOKED"
+            local rc=0
+            bounded run_packaged "$@" > "$MATRIX_OUT_FILE" 2>&1 || rc=$?
+            MATRIX_OUT="$(cat "$MATRIX_OUT_FILE")"
+            # THE BOUND IS FATAL ON ITS OWN, whatever the command's exit status turned out to be.
+            # Reading the marker only when `rc` is nonzero hands the verdict to the process being
+            # judged: a command that catches the signal and returns 0 — or one whose wrapper
+            # returns 0 after its own child was killed — is then indistinguishable from a command
+            # that finished, and a hang ships. The marker is written by the watchdog BEFORE it
+            # signals, so it is a fact about the bound and not about the exit.
+            if timed_out; then
+              echo "::error::packaged matrix: 'sthayi $*' was still running after ${MATRIX_CMD_TIMEOUT}s and was killed — the installed tarball hangs where it must finish"
+              printf '%s\n' "$MATRIX_OUT"
+              exit 1
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::packaged matrix: 'sthayi $*' exited $rc on the installed tarball"
+              printf '%s\n' "$MATRIX_OUT"
+              exit 1
+            fi
+            case "$MATRIX_OUT" in
+              *"is not set"*)
+                echo "::error::packaged matrix: 'sthayi $*' asked for an env var — the installed tarball is not keyless"
+                printf '%s\n' "$MATRIX_OUT"
+                exit 1
+                ;;
+            esac
+          }
+
+          # THE OUTCOME OF THE COMMAND THAT JUST RAN. Exit 0 is not a result; these are.
+          expect_out() {
+            if ! printf '%s\n' "$MATRIX_OUT" | grep -Eq -- "$1"; then
+              echo "::error::packaged matrix: $2"
+              printf '%s\n' "$MATRIX_OUT"
+              exit 1
+            fi
+          }
+
+          # The canary is a SYNTHETIC key shape — the same shape the source-driven matrix uses, and
+          # never a real credential. Masking is a keyless-path guarantee, so it is proved here on
+          # the packaged artifact rather than assumed to have survived packing.
+          MATRIX_CANARY='sk-proj-CANARYaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+
+          # ── THE FACTS THIS RUN ASKS THE STORE FOR, RATHER THAN ASKS THE CLI ABOUT ────────────
+          # A sentence is the command's own report of itself. Each of these is a piece of STATE
+          # that only a command which actually worked can produce, queried back from the store
+          # afterwards. $MATRIX_IMPORT_FACT lives in the export fixture and NOWHERE ELSE in this
+          # run — no `add` below writes it — so it can only be in the store if `import` really
+          # ingested the export. $MATRIX_DUPLICATE is added twice on purpose: two live copies is
+          # the state the deterministic fold must reduce to one, and the rollback must restore.
+          MATRIX_IMPORT_FACT='Alex Doe'
+          MATRIX_DUPLICATE='duplicate fact for rollback'
+
+          # How many LIVE copies of a memory the store will still return. `search` lists live
+          # memories only — an archived one is gone from it — so this is a reading of the store's
+          # state and not of anything a command said about itself. It is computed from the output
+          # of the `keyless search` that must be run immediately before it, so a failing search
+          # still exits the step rather than being swallowed by a command substitution.
+          live_copies() {
+            printf '%s\n' "$MATRIX_OUT" | grep -cF -- "$1" || true
+          }
+          expect_live_copies() {
+            local want="$1" got="$2" what="$3"
+            if [ "$got" != "$want" ]; then
+              echo "::error::packaged matrix: $what — the store returns $got live copy(ies) of '$MATRIX_DUPLICATE', expected $want"
+              printf '%s\n' "$MATRIX_OUT"
+              exit 1
+            fi
+          }
+
+          refute_canary() {
+            if printf '%s\n' "$MATRIX_OUT" | grep -qF -- "$MATRIX_CANARY"; then
+              echo "::error::packaged matrix: $1"
+              exit 1
+            fi
+          }
+
+          # A strong digest of the whole isolated home — names, types, link targets and bytes — so
+          # "a dry run changed nothing" is a comparison rather than a claim. Both spellings exist
+          # because this shell is exercised on machines that ship one or the other.
+          if command -v sha256sum > /dev/null 2>&1; then
+            hash_stdin() { sha256sum | cut -d ' ' -f 1; }
+          else
+            hash_stdin() { shasum -a 256 | cut -d ' ' -f 1; }
+          fi
+          home_digest() {
+            (
+              cd "$MATRIX_HOME" && find . -mindepth 1 | LC_ALL=C sort |
+                while IFS= read -r p; do
+                  if [ -L "$p" ]; then
+                    printf 'L %s -> %s\n' "$p" "$(readlink "$p")"
+                  elif [ -d "$p" ]; then
+                    printf 'D %s\n' "$p"
+                  else
+                    printf 'F %s\n' "$p"
+                    cat "$p"
+                  fi
+                done
+            ) | hash_stdin
+          }
+          expect_home_unchanged() {
+            if [ "$(home_digest)" != "$MATRIX_HOME_BEFORE" ]; then
+              echo "::error::packaged matrix: $1"
+              exit 1
+            fi
+          }
+
+          # The two documented exceptions: they must fail FAST and NAME the variable, not hang and
+          # not succeed by silently reaching a provider.
+          expect_key_required() {
+            local var="$1"
+            shift
+            printf '%s\n' "$1" >> "$MATRIX_INVOKED"
+            local rc=0
+            local out
+            bounded run_packaged "$@" > "$MATRIX_OUT_FILE" 2>&1 || rc=$?
+            out="$(cat "$MATRIX_OUT_FILE")"
+            # Same rule as `keyless`: the bound is fatal on its own. A refusal that arrives only
+            # because the watchdog signalled is not the fast, named refusal this exception is
+            # documented to give, whatever exit status came back with it.
+            if timed_out; then
+              echo "::error::packaged matrix: 'sthayi $*' ran for ${MATRIX_CMD_TIMEOUT}s and was killed — a missing $var must be an immediate named refusal, not a hang"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::packaged matrix: 'sthayi $*' succeeded with no $var — the documented exception is not enforced in the package"
+              exit 1
+            fi
+            case "$out" in
+              *"$var is not set"*) ;;
+              *)
+                echo "::error::packaged matrix: 'sthayi $*' failed without naming $var"
+                printf '%s\n' "$out"
+                exit 1
+                ;;
+            esac
+          }
+
+          keyless --version
+          if [ "$(printf '%s' "$MATRIX_OUT" | tr -d '[:space:]')" != "$VERSION" ]; then
+            echo "::error::packaged matrix: installed --version '$MATRIX_OUT' != release version '$VERSION'"
+            exit 1
+          fi
+          keyless --help
+          for c in $PACKAGED_MATRIX_COMMANDS; do
+            expect_out "$c" "the installed tarball's --help never lists '$c'"
+          done
+
+          # A DRY RUN PRINTS A PLAN AND WRITES NOTHING. It runs before anything touches the store,
+          # so the home it must leave alone is the empty one this run just made.
+          MATRIX_HOME_BEFORE="$(home_digest)"
+          keyless init --dry-run
+          expect_out 'Dry run — would initialize' "'init --dry-run' printed no plan"
+          expect_out 'create db' "'init --dry-run' never says it would create the db"
+          expect_out 'create launcher' "'init --dry-run' never says it would create the launcher"
+          expect_home_unchanged "'init --dry-run' changed the home — it prints what WOULD happen, it does not do it"
+          for e in .sthayi/sthayi.db .sthayi/key .sthayi/bin .sthayi/skills; do
+            if [ -e "$MATRIX_HOME/$e" ]; then
+              echo "::error::packaged matrix: 'init --dry-run' created $e"
+              exit 1
+            fi
+          done
+
+          keyless add the packaged keyless matrix proposal
+          expect_out 'added proposed' "'add' stored no proposal"
+          keyless add --confirm "$MATRIX_DUPLICATE"
+          expect_out 'added confirmed' "'add --confirm' stored no confirmed memory"
+          keyless add --confirm "$MATRIX_DUPLICATE"
+          expect_out 'added confirmed' "'add --confirm' stored no second (duplicate) memory for the fold to find"
+          keyless add --confirm ci canary "$MATRIX_CANARY"
+          expect_out 'added confirmed' "'add' stored no canary memory"
+          refute_canary "'add' echoed the secret back unmasked — masking does not hold in the package"
+
+          keyless search "$MATRIX_DUPLICATE"
+          expect_out 'duplicate' "'search' returned no result — the packaged CLI stored or indexed nothing"
+          expect_live_copies 2 "$(live_copies "$MATRIX_DUPLICATE")" "'add --confirm' twice left no pair for the fold to find"
+          keyless review
+          expect_out 'proposal' "'review' listed no proposal queue"
+
+          keyless import "$FIXTURE"
+          expect_out 'Imported [0-9]+ memor' "'import' ingested nothing from the export fixture"
+          # AND THE STATE, NOT THE COUNT IT PRINTED. `Imported N` is the command's report of
+          # itself; this asks the STORE for a fact that exists only in the export fixture, so a
+          # command that announced an ingest it did not perform has nothing to answer with.
+          keyless search "$MATRIX_IMPORT_FACT"
+          expect_out "$MATRIX_IMPORT_FACT" "'import' printed its success line but the store cannot return the fixture's own '$MATRIX_IMPORT_FACT' — nothing was ingested"
+
+          keyless consolidate
+          expect_out 'Deterministic: .*→ [1-9][0-9]* archived' "'consolidate' archived nothing — the deterministic fold is a no-op in the package"
+          # AND THE STATE: two live copies went in, one comes out. A fold that printed the same
+          # counts and archived nothing fails HERE, against the store, not against its own report.
+          keyless search "$MATRIX_DUPLICATE"
+          expect_live_copies 1 "$(live_copies "$MATRIX_DUPLICATE")" "'consolidate' reported an archived duplicate and the store still returns both"
+
+          keyless journal -n 200
+          expect_out '^#[0-9]+' "'journal' listed no entries"
+          JOURNAL_BEFORE="$(printf '%s\n' "$MATRIX_OUT" | grep -c '^#' || true)"
+          BATCH="$(printf '%s\n' "$MATRIX_OUT" |
+            awk '/^#[0-9]+[[:space:]]/ && $NF == "consolidate" { id = substr($1, 2) } END { print id }')"
+          if [ -z "$BATCH" ]; then
+            echo "::error::packaged matrix: no consolidate batch in the installed CLI's journal"
+            printf '%s\n' "$MATRIX_OUT"
+            exit 1
+          fi
+          keyless rollback "$BATCH"
+          expect_out 'Rolled back #[0-9]+: .*chain intact: true' "'rollback' reported no reverted batch with an intact chain"
+          # AND THE EFFECT, not the sentence. A rollback reverts by APPENDING compensating entries,
+          # so the journal is strictly longer afterwards; a rollback that printed its success line
+          # and changed nothing fails here rather than passing on its own report.
+          keyless journal -n 200
+          JOURNAL_AFTER="$(printf '%s\n' "$MATRIX_OUT" | grep -c '^#' || true)"
+          if [ "$JOURNAL_AFTER" -le "$JOURNAL_BEFORE" ]; then
+            echo "::error::packaged matrix: 'rollback' appended no compensating journal entries (${JOURNAL_BEFORE} -> ${JOURNAL_AFTER}) — it reported success and reverted nothing"
+            exit 1
+          fi
+          # AND THE STATE THE ROLLBACK EXISTS FOR. Compensating entries prove a rollback was
+          # RECORDED; only the store proves it was APPLIED. The copy the fold archived is live
+          # again, so the count returns to what it was before `consolidate` ran.
+          keyless search "$MATRIX_DUPLICATE"
+          expect_live_copies 2 "$(live_copies "$MATRIX_DUPLICATE")" "'rollback' recorded compensating entries but the archived duplicate is still archived"
+          keyless journal --verify
+          expect_out 'journal OK' "the journal chain is not intact after consolidate + rollback on the packaged artifact"
+
+          keyless index status
+          expect_out 'association graph: [0-9]+ edge\(s\), folded through journal' "'index status' reported no folded association graph"
+          keyless index rebuild
+          expect_out 'association graph rebuilt from the journal: [0-9]+ edge\(s\)' "'index rebuild' did not re-derive the graph from the journal"
+
+          keyless pack
+          expect_out 'Wrote masked memory pack' "'pack' reported no memory pack"
+          refute_canary "'pack' printed the secret unmasked"
+          # THE FILE, not the sentence: `pack` names what it wrote, so the gate opens it. A command
+          # that prints a success line and produces no artifact is the shape this catches, and a
+          # pack that ships the raw secret is the other.
+          PACK_FILE="$(printf '%s\n' "$MATRIX_OUT" | sed -n 's/^.*Wrote masked memory pack: //p' | tail -n 1)"
+          if [ -z "$PACK_FILE" ] || [ ! -f "$PACK_FILE" ]; then
+            echo "::error::packaged matrix: 'pack' announced a memory pack at '$PACK_FILE' that does not exist"
+            exit 1
+          fi
+          if [ ! -s "$PACK_FILE" ]; then
+            echo "::error::packaged matrix: the memory pack at $PACK_FILE is empty — 'pack' created a file and wrote nothing into it"
+            exit 1
+          fi
+          # WHAT IS IN IT, not merely that something is. An empty or unrelated file with the right
+          # name satisfies "the announced pack exists" completely, so the pack is required to hold
+          # BOTH HALVES of what it is for: a memory that was confirmed above, and the canary
+          # memory in its MASKED form — the same pseudonym `entities` decodes below. The secret
+          # itself must be absent, which is the check after these two.
+          if ! grep -qF -- "$MATRIX_DUPLICATE" "$PACK_FILE"; then
+            echo "::error::packaged matrix: the memory pack at $PACK_FILE carries no confirmed memory — '$MATRIX_DUPLICATE' is not in it"
+            exit 1
+          fi
+          if ! grep -qF -- 'ci canary APIKEY_01' "$PACK_FILE"; then
+            echo "::error::packaged matrix: the memory pack at $PACK_FILE does not carry the canary memory in masked form ('ci canary APIKEY_01')"
+            exit 1
+          fi
+          if grep -qF -- "$MATRIX_CANARY" "$PACK_FILE"; then
+            echo "::error::packaged matrix: the memory pack at $PACK_FILE holds the secret unmasked"
+            exit 1
+          fi
+
+          # `entities` IS the local decode table — the one surface where the real value is meant to
+          # be readable ("never leaves this machine"), and the line the pack above tells the reader
+          # to run. So this asks for the MAPPING: the pseudonym the pack shipped, the kind, and the
+          # value it decodes to. That is the state which proves the vault really holds what the
+          # pack masked, and it is why the canary is not refuted here — a gate that refused the
+          # value on THIS command would fail every correct build of the CLI.
+          keyless entities
+          expect_out 'APIKEY_01' "'entities' shows no local pseudonym for the vaulted canary"
+          expect_out "APIKEY_01[[:space:]]+APIKEY[[:space:]]+$MATRIX_CANARY" "'entities' does not decode APIKEY_01 back to the vaulted canary — the pseudonym the pack shipped maps to nothing"
+          keyless status
+          expect_out 'client' "'status' reported no per-client wiring"
+
+          MATRIX_HOME_BEFORE="$(home_digest)"
+          keyless wire --dry-run
+          expect_out 'Dry run|No detected clients' "'wire --dry-run' printed no plan"
+          expect_home_unchanged "'wire --dry-run' changed the home — a dry run is byte-for-byte inert"
+          MATRIX_HOME_BEFORE="$(home_digest)"
+          keyless unwire --dry-run
+          expect_out 'Dry run' "'unwire --dry-run' printed no plan"
+          expect_home_unchanged "'unwire --dry-run' changed the home — a dry run is byte-for-byte inert"
+
+          keyless doctor
+          expect_out 'All checks passed\.' "'doctor' does not pass on a zero-config packaged install"
+
+          # `serve` is the stdio MCP server: it is proved by STAYING UP and by staying silent on
+          # stdout until a client speaks, so it cannot be run through `keyless`. It carries its own
+          # bound — a fixed observation window, then the signal — for the same reason every other
+          # command carries one: nothing here may wait on the artifact indefinitely.
+          printf '%s\n' serve >> "$MATRIX_INVOKED"
+          SERVE_OUT="$(mktemp)"
+          SERVE_ERR="$(mktemp)"
+          # A stdio MCP server is alive only while a client owns stdin. GitHub Actions gives a
+          # background job EOF by default, which correctly means "the client disconnected" and
+          # makes the server exit. Hold one private FIFO open read/write for the observation so
+          # this probe measures a connected-but-silent client, just like the source test's piped
+          # stdin. Fixed fd 9 is deliberate: macOS still ships Bash 3.2, which lacks `exec {fd}`.
+          SERVE_STDIN="$MATRIX_SCRATCH/serve.stdin"
+          mkfifo "$SERVE_STDIN"
+          exec 9<>"$SERVE_STDIN"
+          set -m
+          run_packaged serve <&9 > "$SERVE_OUT" 2> "$SERVE_ERR" &
+          SERVE_PID=$!
+          set +m
+          sleep 3
+          if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+            echo "::error::packaged matrix: 'sthayi serve' exited early on the installed tarball"
+            cat "$SERVE_ERR"
+            exit 1
+          fi
+          # THE SAME RETIREMENT AS EVERY OTHER COMMAND, and `serve` is the one that most needs it:
+          # it is a server, the pid `$!` names is the wrapper that execs it, and a `kill $!` here
+          # would leave a live MCP server holding this run's isolated home for the rest of the job.
+          kill -TERM "-$SERVE_PID" 2>/dev/null || true
+          wait "$SERVE_PID" 2>/dev/null || true
+          # Closing the owner produces EOF; the FIFO itself stays inside the already-throwaway
+          # MATRIX_SCRATCH root and is removed with that runner workspace, not by a second cleanup
+          # path whose target could drift toward the pinned installation.
+          exec 9>&-
+          if ! group_retired "$SERVE_PID"; then
+            echo "::error::packaged matrix: 'sthayi serve' left a process running after it was retired"
+            exit 1
+          fi
+          if [ -s "$SERVE_OUT" ]; then
+            echo "::error::packaged matrix: 'sthayi serve' wrote to stdout before any client spoke"
+            cat "$SERVE_OUT"
+            exit 1
+          fi
+
+          expect_key_required ANTHROPIC_API_KEY consolidate --oracle --provider anthropic:claude-sonnet-4-5
+          expect_key_required OPENAI_API_KEY qualify openai:gpt-5
+
+          # THE LEDGER IS RE-CHECKED AGAINST WHAT RAN. Listing a command above proves nothing if the
+          # invocation was deleted; this is the assertion that makes the ledger load-bearing.
+          for c in $PACKAGED_MATRIX_COMMANDS; do
+            if ! grep -qxF "$c" "$MATRIX_INVOKED"; then
+              echo "::error::packaged matrix: '$c' is in the coverage ledger but was never invoked"
+              exit 1
+            fi
+          done
+          echo "packaged keyless matrix OK: every registered command ran on the installed tarball"
+
+  freshtest-docker:
+    # Fresh-machine keyless install of the EXACT release tarball in a clean Node 22 container.
+    # Docker missing => the release run FAILS. Never a silent DEFERRED success on a release.
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7 # for Dockerfile.freshtest
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sthayi-tarball-${{ needs.preflight.outputs.version }}
+          path: freshtest-artifact
+
+      - name: Require Docker (a release must not defer this gate)
+        run: |
+          if ! command -v docker > /dev/null 2>&1; then
+            echo "::error::Docker is unavailable on this runner — the release freshtest is mandatory and cannot be deferred"
+            exit 1
+          fi
+          docker info > /dev/null
+
+      - name: Fresh-install the exact release tarball in a clean container
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SHA: ${{ needs.build.outputs.tarball-sha256 }}
+        run: |
+          # THE ONE DIGEST THIS STEP TRUSTS IS THE BUILD JOB'S OUTPUT, and it arrives through the
+          # workflow control plane — not through the runner's filesystem, where every file this
+          # step can read is also a file an attacker who reached the runner can write. A digest
+          # parsed out of the downloaded SHA256SUMS is authority over nothing: replace the tarball
+          # AND the manifest together and the expectation moves with the substitute, which is then
+          # compared to itself and accepted. There is deliberately NO second read of a mutable
+          # pathname for authority anywhere below: $EXPECTED_SHA is set once, from outside this
+          # machine, and everything is compared to it.
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::the build job published no usable tarball digest ('$EXPECTED_SHA') — this release has nothing immutable to pin to"
+            exit 1
+          fi
+
+          TARBALL_NAME="sthayi-${VERSION}.tgz"
+          SUMS_FILE="freshtest-artifact/SHA256SUMS"
+          if [ ! -f "$SUMS_FILE" ]; then
+            echo "::error::$SUMS_FILE is missing — the published manifest must be present to be checked against the build job"
+            exit 1
+          fi
+          # STRICT parse, not a search for a usable line: exactly one entry, exactly 64 lowercase
+          # hex digits, and the filename compared as a literal string against this release's.
+          SUMS_LINES="$(awk 'END { print NR }' "$SUMS_FILE")"
+          if [ "$SUMS_LINES" != "1" ]; then
+            echo "::error::$SUMS_FILE holds $SUMS_LINES lines — exactly one entry for $TARBALL_NAME is required"
+            exit 1
+          fi
+          IFS= read -r SUMS_LINE < "$SUMS_FILE" || true
+          SUMS_RE='^([0-9a-f]{64}) [ *](.+)$'
+          if [[ ! "$SUMS_LINE" =~ $SUMS_RE ]]; then
+            echo "::error::$SUMS_FILE does not hold one sha256sum entry: $SUMS_LINE"
+            exit 1
+          fi
+          SUMS_SHA="${BASH_REMATCH[1]}"
+          SUMS_NAME="${BASH_REMATCH[2]}"
+          if [ "$SUMS_NAME" != "$TARBALL_NAME" ]; then
+            echo "::error::$SUMS_FILE covers '$SUMS_NAME', not the release artifact '$TARBALL_NAME'"
+            exit 1
+          fi
+          # THE MANIFEST IS A PUBLISHED CLAIM THAT MUST AGREE WITH THE BUILD JOB — never the source
+          # of the value anything is compared to. This is the check a dual replacement of the
+          # tarball and its manifest fails.
+          if [ "$SUMS_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::$SUMS_FILE pins $SUMS_SHA for $SUMS_NAME, but the build job packed $EXPECTED_SHA — the manifest and the artifact were replaced together"
+            exit 1
+          fi
+
+          # Stage the build context so the daemon receives the Dockerfile, the ignore file and the
+          # checksummed tarball — and NOT the checkout. Same shape as scripts/freshtest.sh, so the
+          # gate a developer runs locally and the gate a release runs build the same three files.
+          ctx="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sthayi-freshtest.XXXXXXXX")"
+          cp Dockerfile.freshtest .dockerignore "$ctx/"
+
+          # THE SOURCE, IMMEDIATELY BEFORE IT IS STAGED. Every check above and the copy below are
+          # separate instants, and the copy is what the daemon ends up building; a replacement that
+          # lands in between is caught here, against the build job's digest.
+          SOURCE_SHA="$(sha256sum "freshtest-artifact/$TARBALL_NAME" | cut -d ' ' -f 1)"
+          if [ "$SOURCE_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::$TARBALL_NAME ($SOURCE_SHA) is not the artifact the build job packed ($EXPECTED_SHA) — it changed after the manifest was verified"
+            exit 1
+          fi
+          cp "freshtest-artifact/$TARBALL_NAME" "$ctx/freshtest.tgz"
+          # AND THE STAGED BYTES, against the SAME immutable digest.
+          STAGED_SHA="$(sha256sum "$ctx/freshtest.tgz" | cut -d ' ' -f 1)"
+          if [ "$STAGED_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::staged freshtest.tgz ($STAGED_SHA) is not the artifact the build job packed ($EXPECTED_SHA)"
+            exit 1
+          fi
+
+          # WHAT THE DAEMON ACTUALLY RECEIVES, enumerated rather than assumed — the same assertion
+          # scripts/freshtest.sh makes. A fourth entry here is a file uploaded to the daemon that
+          # no one decided to send, and any later `COPY` could reach it.
+          CONTEXT_ENTRIES="$(cd "$ctx" && LC_ALL=C ls -A | LC_ALL=C sort | tr '\n' ' ')"
+          if [ "$CONTEXT_ENTRIES" != ".dockerignore Dockerfile.freshtest freshtest.tgz " ]; then
+            echo "::error::refusing to build — staged context holds '$CONTEXT_ENTRIES'"
+            exit 1
+          fi
+
+          (cd "$ctx" && docker build -f Dockerfile.freshtest -t sthayi-freshtest --build-arg TGZ=freshtest.tgz .)
+          docker run --rm sthayi-freshtest
+
+  draft-release:
+    # Draft GitHub release with the gated tarball + checksums attached — a human reviews and
+    # publishes the release notes. Never publishes to npm.
+    needs: [preflight, build, smoke-install, freshtest-docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sthayi-tarball-${{ needs.preflight.outputs.version }}
+      - name: Create draft release with artifacts
+        # THE RELEASE ATTACHES TWO NAMED FILES. `sthayi-*.tgz` attaches whatever matches in the
+        # download directory, so one extra archive that reached the artifact would become a download
+        # on the release page — served under the project's name, past every gate, and covered by no
+        # digest. The name comes from the BUILD JOB's output, fixed by the workflow control plane
+        # when that job ended; nothing on this runner can change it. The directory is enumerated
+        # first, because "the glob only names one file" is a claim about what is there.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL_NAME: ${{ needs.build.outputs.tarball-name }}
+        run: |
+          if ! printf '%s' "$TARBALL_NAME" | grep -Eq '^sthayi-[0-9A-Za-z.+-]+\.tgz$'; then
+            echo "::error::the build job published no usable tarball name ('$TARBALL_NAME')"
+            exit 1
+          fi
+          DOWNLOADED="$(LC_ALL=C ls -A | LC_ALL=C sort | tr '\n' ' ')"
+          if [ "$DOWNLOADED" != "SHA256SUMS $TARBALL_NAME " ]; then
+            echo "::error::refusing to draft a release — the downloaded artifact holds '$DOWNLOADED', not exactly 'SHA256SUMS $TARBALL_NAME'"
+            exit 1
+          fi
+          gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --draft --title "${GITHUB_REF_NAME}" --generate-notes \
+            "$TARBALL_NAME" SHA256SUMS
+
+  publish:
+    # The ONLY npm-publish path: every gate green, then a human approves the protected
+    # `npm-production` environment, then npm trusted publishing authenticates this exact workflow
+    # over OIDC and the EXACT gated tarball is published with provenance. No npm write token is
+    # provided to this job.
+    # This job never rebuilds and never repacks. Publish also requires the draft release to
+    # exist so the artifact record is in place before npm distribution.
+    needs: [preflight, build, smoke-install, freshtest-docker, draft-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: npm-production
+      url: https://www.npmjs.com/package/sthayi
+    concurrency:
+      group: npm-production-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # token-free npm trusted publishing + provenance for this public source commit
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Pin the npm CLI that performs trusted publishing
+        run: |
+          npm install --global --ignore-scripts --no-audit --no-fund npm@11.11.0
+          test "$(npm --version)" = "11.11.0"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sthayi-tarball-${{ needs.preflight.outputs.version }}
+
+      - name: Publish the exact gated tarball with provenance
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          EXPECTED_SHA: ${{ needs.build.outputs.tarball-sha256 }}
+        run: |
+          TARBALL="sthayi-${VERSION}.tgz"
+          if [ ! -f "$TARBALL" ]; then
+            echo "::error::expected gated artifact '$TARBALL' not found"
+            exit 1
+          fi
+          # THE BYTES ABOUT TO BE PUBLISHED, AGAINST THE BUILD JOB'S IMMUTABLE DIGEST. `sha256sum -c
+          # SHA256SUMS` would only prove the tarball agrees with the manifest sitting beside it —
+          # replace both and the pair agrees with itself while npm receives something no gate ever
+          # ran. The expectation therefore comes from outside this runner.
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::the build job published no usable tarball digest ('$EXPECTED_SHA') — refusing to publish unpinned bytes"
+            exit 1
+          fi
+          GOT_SHA="$(sha256sum "$TARBALL" | cut -d ' ' -f 1)"
+          if [ "$GOT_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::$TARBALL ($GOT_SHA) is not the artifact the build job packed ($EXPECTED_SHA) — refusing to publish"
+            exit 1
+          fi
+          npm publish "$TARBALL" --provenance --access public

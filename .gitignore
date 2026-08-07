@@ -1,0 +1,37 @@
+# Personal data — NEVER commit (spec §0d hard rule).
+# Nothing under seed/ is ever committed, copied into tests/, or pasted into any committed file.
+seed/
+tests/fixtures/clients/real-local/
+
+# Dev/runtime artifacts
+.sthayi-dev-home/
+# scripts/freshtest.sh holds a kernel advisory lock (flock/lockf) on this file across the shared
+# build+pack section. It is repo-private and stable BY DESIGN — deliberately not under
+# node_modules/, which a pnpm install or prune can delete mid-run, leaving two runs locking two
+# different files. The script never removes it.
+.sthayi-freshtest.lock
+# tests/helpers/build-cli.ts holds the same kind of kernel advisory lock across the CLI build the
+# safety suite spawns. Repo-private and stable for the same reason: node_modules/.cache, where the
+# old lock lived, is package-manager state a pnpm install or prune deletes mid-run, so two runs
+# would lock two different files and both build. The harness never removes it.
+.sthayi-build.lock
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.sthayi-bak-*
+*.tgz
+
+# npm pack copies (packages/cli prepack copies these in from the repo root; postpack removes them)
+packages/cli/README.md
+packages/cli/LICENSE
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example

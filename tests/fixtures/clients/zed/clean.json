@@ -1,0 +1,5 @@
+{
+  // Zed user settings — the syntax is JSON with support for comments.
+  "theme": "One Dark",
+  "buffer_font_size": 14
+}

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }}, Node ${{ matrix.node-version }})
+    strategy:
+      fail-fast: false
+      # NODE 22 AND 24 ARE THE COMPLETE SUPPORTED SET. `engines.node` admits those two LTS majors
+      # and no others, so both have to exercise the full product suite on every claimed platform.
+      # Running both on Linux, macOS and Windows also catches native-module ABI and launcher/path
+      # differences before a user reaches them.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node-version: 22
+          - os: macos-latest
+            node-version: 22
+          - os: windows-latest
+            node-version: 22
+          - os: ubuntu-latest
+            node-version: 24
+          - os: macos-latest
+            node-version: 24
+          - os: windows-latest
+            node-version: 24
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # SETUP-NODE FIRST, AND NOTHING REACHES FOR pnpm BEFORE IT. Corepack is a shim shipped with
+      # (some) Node distributions, so `corepack enable` ahead of this step runs against whatever
+      # Node the runner image happens to carry — on an image that carries no Corepack the job dies
+      # before it has a toolchain at all, and on one that carries a different Node it enables a
+      # shim for a runtime this job is about to replace. The package manager is therefore
+      # bootstrapped AFTER the runtime, from the version this repository pins.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          # Deliberately NO `cache: pnpm`. setup-node resolves the pnpm store path by RUNNING
+          # pnpm, which is the binary that does not exist yet at this point in the job — the
+          # cache option is precisely the assumption this ordering removes.
+
+      - name: Install pnpm (the exact packageManager version, via npm)
+        shell: bash
+        run: |
+          # package.json is the single source of truth for the package-manager version; deriving
+          # it here means the bootstrap cannot drift from the lockfile it is about to install.
+          RAW="$(node -p "require('./package.json').packageManager")"
+          case "$RAW" in
+            pnpm@*) EXPECTED="${RAW#pnpm@}" ;;
+            *) echo "::error::package.json packageManager is '$RAW', not a pnpm@x.y.z pin"; exit 1 ;;
+          esac
+          if ! printf '%s' "$EXPECTED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::packageManager pins '$EXPECTED', which is not an exact x.y.z version"
+            exit 1
+          fi
+          npm install --global "pnpm@$EXPECTED"
+          # THE ASSERTION: the pnpm that answers on PATH is that exact version. A shim, a cached
+          # global, or an image-provided pnpm answering instead fails the job here rather than
+          # installing a dependency tree this lockfile never described.
+          GOT="$(pnpm --version)"
+          if [ "$GOT" != "$EXPECTED" ]; then
+            echo "::error::pnpm --version is '$GOT', expected exactly '$EXPECTED' (package.json packageManager)"
+            exit 1
+          fi
+          echo "pnpm $GOT bootstrapped on Node $(node --version)"
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        # Windows has no flock/lockf. This flag authorises Vitest global setup — and only that
+        # pre-dispatch phase of this isolated Actions job — to run the same exact CLI build/record
+        # critical section synchronously, then consume the flag before workers inherit the env.
+        # Every product suite still runs; by the time workers call ensureBuiltCli(), the
+        # content-derived marker is already current for their NODE_OPTIONS.
+        env:
+          STHAYI_ISOLATED_WINDOWS_CI_TEST_JOB: ${{ runner.os == 'Windows' && '1' || '0' }}
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

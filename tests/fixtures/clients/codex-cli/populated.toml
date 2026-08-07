@@ -1,0 +1,18 @@
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+enabled = true
+
+[mcp_servers.node_repl]
+command = "/opt/node_repl"
+args = []
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+CODEX_HOME = "/Users/fixture/.codex"
+
+[plugins."github@openai-curated"]
+enabled = true

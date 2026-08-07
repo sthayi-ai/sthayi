@@ -1,0 +1,25 @@
+packages:
+  - packages/*
+
+# Keep allowed runtime and build-tool transitive ranges on versions that contain the current
+# security fixes. These are exact because the release audit is a gate, not an advisory-only report.
+overrides:
+  fast-uri: 3.1.5
+  hono: 4.12.34
+  ip-address: 10.3.1
+  postcss: 8.5.25
+  vite: 6.4.3
+  "bundle-require>esbuild": 0.28.1
+  "tsup>esbuild": 0.28.1
+
+# Native/postinstall build scripts are blocked by default in pnpm 10+. Approve only the
+# dependencies we trust to run install scripts (native binary / prebuilt-binary fetch).
+allowBuilds:
+  '@biomejs/biome': true
+  better-sqlite3: true
+  esbuild: true
+
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+  - '@biomejs/biome'

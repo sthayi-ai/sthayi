@@ -1,0 +1,13 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "e3",
+        "content": "I said several times that I prefer to be called Sam rather than Samuel."
+      }
+    ]
+  },
+  "expect": {
+    "promote": ["e3"]
+  }
+}

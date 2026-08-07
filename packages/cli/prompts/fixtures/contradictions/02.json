@@ -1,0 +1,17 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "c",
+        "content": "Deploys to production on Fridays."
+      },
+      {
+        "id": "d",
+        "content": "Never deploys to production on Fridays."
+      }
+    ]
+  },
+  "expect": {
+    "contradiction": [["c", "d"]]
+  }
+}

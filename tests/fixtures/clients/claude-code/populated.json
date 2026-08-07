@@ -1,0 +1,23 @@
+{
+  "numStartups": 42,
+  "theme": "dark",
+  "projects": {
+    "/Users/fixture/proj": {
+      "allowedTools": [],
+      "enabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true
+    }
+  },
+  "mcpServers": {
+    "linear": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "linear-mcp"
+      ],
+      "env": {
+        "LINEAR_API_KEY": "lin_FAKE000000000000000000"
+      }
+    }
+  }
+}

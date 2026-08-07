@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "other-tool": {
+      "command": "uvx",
+      "args": ["other-tool-mcp"],
+      "disabled": true,
+      "alwaysAllow": ["some_tool"],
+      "timeout": 120
+    }
+  }
+}

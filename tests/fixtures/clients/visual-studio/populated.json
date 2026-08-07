@@ -1,0 +1,20 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "other-key",
+      "description": "Other tool key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "other-tool": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "other-tool-mcp"]
+    },
+    "remote-tool": {
+      "url": "https://example.com/mcp"
+    }
+  }
+}

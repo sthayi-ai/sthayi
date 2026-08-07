@@ -1,0 +1,9 @@
+[
+  {
+    "conversations_memory": "**Work context**\n\nAlex Doe is a developer building a TypeScript CLI named \"widget\". Prefers pnpm and vitest; dislikes Jest. Deploys on Fridays.",
+    "project_memories": {
+      "proj-widget": "***Project scope & domain***\nThe user is developing \"widget\", a local-first CLI. Stack: TypeScript strict, pnpm workspaces, vitest, Biome."
+    },
+    "account_uuid": "00000000-0000-0000-0000-0000000000a1"
+  }
+]

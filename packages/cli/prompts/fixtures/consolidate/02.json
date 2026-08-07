@@ -1,0 +1,25 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "x",
+        "content": "Deploys on Fridays only."
+      },
+      {
+        "id": "y",
+        "content": "The user deploys on Fridays."
+      },
+      {
+        "id": "z",
+        "content": "User only deploys code on Fridays."
+      },
+      {
+        "id": "w",
+        "content": "Uses vitest for testing."
+      }
+    ]
+  },
+  "expect": {
+    "redundant": [["x", "y", "z"]]
+  }
+}

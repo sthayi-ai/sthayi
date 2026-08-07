@@ -1,0 +1,12 @@
+# Normalize all text files to LF on every platform so tooling (Biome formatter, tests that
+# read fixtures, hash chains over file content) behaves identically on macOS/Linux/Windows.
+# Without this, Windows checks out CRLF and `biome check` fails in CI.
+* text=auto eol=lf
+
+# Explicitly binary (never touch line endings)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.node binary

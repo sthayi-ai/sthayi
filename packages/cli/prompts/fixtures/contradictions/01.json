@@ -1,0 +1,17 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "a",
+        "content": "The user prefers tabs for indentation."
+      },
+      {
+        "id": "b",
+        "content": "The user prefers spaces over tabs."
+      }
+    ]
+  },
+  "expect": {
+    "contradiction": [["a", "b"]]
+  }
+}

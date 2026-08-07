@@ -1,0 +1,47 @@
+# Fresh-machine install smoke test (spec §8 / toolkit task 7): install the packed `sthayi` tarball
+# the way the README tells a reader to install it, in a clean Node 22 image, then run the
+# FRESH-INSTALL SMOKE SUBSET — no repo, no env vars, no API key.
+#
+# SUBSET, NOT THE MATRIX. The keyless matrix is every registered CLI command except the two
+# provider-dependent ones (`consolidate --oracle`, `qualify`). This image runs six of them. Six
+# commands named "the keyless matrix" would claim a fresh-machine guarantee the other eleven never
+# got. The full matrix is gated twice: tests/safety/keyless-matrix.test.ts drives the built CLI
+# from source, and tests/safety/packaged-keyless-matrix.test.ts gates the release job that drives
+# every command against the INSTALLED TARBALL.
+#
+# WHY NON-ROOT, AND WHY `--prefix`. The advertised headline install is
+# `npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init`. A root
+# `npm install -g` writes to the image's SYSTEM prefix — a path an ordinary reader cannot write to
+# without sudo — so it would prove a route nobody is told to take while hiding every permission,
+# PATH and shim consequence of the route they ARE told to take. This image installs as the
+# unprivileged `node` user into `$HOME/.local` and invokes the shim by its absolute path, exactly
+# as the README does. `tests/safety/freshtest-gate-contract.test.ts` fails `pnpm test` if that
+# regresses back to a root global install.
+#
+# WHY THE SUBSET RUNS AT `docker run` TIME. A build-time `RUN` bakes its result into a layer: once
+# the image exists the container does nothing, a cached layer can satisfy a later build, and the
+# gate's `docker run` cannot fail. The subset IS the test, so it is the ENTRYPOINT — every
+# `docker run` executes it and a regression surfaces as a nonzero RUN exit status, which is what
+# both `scripts/freshtest.sh` and the release workflow read.
+FROM node:22-slim
+
+ARG TGZ=freshtest.tgz
+
+# The tarball lands owned by the unprivileged user, so the install below needs no privilege at all.
+COPY --chown=node:node ${TGZ} /home/node/sthayi.tgz
+
+USER node
+WORKDIR /home/node
+ENV HOME=/home/node
+
+# The advertised headline install, verbatim: user-space, no sudo, no system prefix.
+RUN npm install -g --prefix "$HOME/.local" /home/node/sthayi.tgz
+
+# Fresh-install smoke subset — these six commands must succeed with ZERO env vars, invoked through
+# the shim the `--prefix` install wrote and NOT through PATH: the headline route adds nothing to
+# PATH, so resolving `sthayi` any other way would test a different installation than the one the
+# README produces. `init --yes` runs first because doctor requires the store and launcher it
+# creates, and in a fresh container no clients are detected so `--yes` wires nothing. What this
+# layer is for is the FRESH MACHINE — no toolchain, no repo, no cache — not command coverage; the
+# per-command matrix is gated elsewhere (see the header).
+ENTRYPOINT ["/bin/sh", "-euc", "sthayi=\"$HOME/.local/bin/sthayi\" && \"$sthayi\" --version && \"$sthayi\" --help && \"$sthayi\" init --yes && \"$sthayi\" doctor && \"$sthayi\" status && \"$sthayi\" journal && echo 'freshtest: fresh-install smoke subset OK'"]

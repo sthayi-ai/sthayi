@@ -1,0 +1,98 @@
+[
+  {
+    "title": "Preferences and stack",
+    "create_time": 1767348000,
+    "update_time": 1767348300,
+    "current_node": "n3",
+    "moderation_results": [],
+    "mapping": {
+      "root": {
+        "id": "root",
+        "message": null,
+        "parent": null,
+        "children": [
+          "n1"
+        ]
+      },
+      "n1": {
+        "id": "n1",
+        "message": {
+          "id": "n1",
+          "author": {
+            "role": "system",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1767348000,
+          "update_time": 1767348000,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              ""
+            ]
+          },
+          "status": "finished_successfully",
+          "weight": 1,
+          "metadata": {},
+          "recipient": "all"
+        },
+        "parent": "root",
+        "children": [
+          "n2"
+        ]
+      },
+      "n2": {
+        "id": "n2",
+        "message": {
+          "id": "n2",
+          "author": {
+            "role": "user",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1767348100,
+          "update_time": 1767348100,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "I use TypeScript and pnpm. Please remember I prefer tabs over spaces."
+            ]
+          },
+          "status": "finished_successfully",
+          "weight": 1,
+          "metadata": {},
+          "recipient": "all"
+        },
+        "parent": "n1",
+        "children": [
+          "n3"
+        ]
+      },
+      "n3": {
+        "id": "n3",
+        "message": {
+          "id": "n3",
+          "author": {
+            "role": "assistant",
+            "name": null,
+            "metadata": {}
+          },
+          "create_time": 1767348200,
+          "update_time": 1767348200,
+          "content": {
+            "content_type": "text",
+            "parts": [
+              "Noted — TypeScript, pnpm, tabs over spaces."
+            ]
+          },
+          "status": "finished_successfully",
+          "weight": 1,
+          "metadata": {},
+          "recipient": "all"
+        },
+        "parent": "n2",
+        "children": []
+      }
+    }
+  }
+]

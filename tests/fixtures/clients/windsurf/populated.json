@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "other-tool": {
+      "command": "npx",
+      "args": ["-y", "other-tool-mcp"],
+      "env": { "OTHER_KEY": "${env:OTHER_KEY}" }
+    },
+    "remote-tool": {
+      "serverUrl": "https://example.com/mcp"
+    }
+  }
+}

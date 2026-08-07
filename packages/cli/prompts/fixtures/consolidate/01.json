@@ -1,0 +1,21 @@
+{
+  "input": {
+    "items": [
+      {
+        "id": "a",
+        "content": "The user prefers pnpm over npm."
+      },
+      {
+        "id": "b",
+        "content": "User prefers pnpm over npm."
+      },
+      {
+        "id": "c",
+        "content": "The user lives in Seattle."
+      }
+    ]
+  },
+  "expect": {
+    "redundant": [["a", "b"]]
+  }
+}
