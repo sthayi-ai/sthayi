@@ -24,7 +24,7 @@ only the local MCP server running on your machine. Theirs stay theirs. This one 
 
 ### Prerequisite: Node.js 22 or 24
 
-Sthayi v0.1.1 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. Check
+Sthayi v0.1.2 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. Check
 both before installing:
 
 ```text
@@ -46,14 +46,16 @@ needs neither `sudo` nor administrator rights.
 
 ### Install and initialize
 
-> Sthayi v0 uses a `better-sqlite3`-backed local store. The user-space command below installs the
-> latest published npm release. Before using this package-name route, verify that
-> `npm view sthayi version` reports `0.1.0` or newer; otherwise use the
-> [Development](#development) setup below. Do not substitute `npx sthayi init`.
+> Sthayi v0 uses a `better-sqlite3`-backed local store. The user-space command below first refuses
+> any Node major other than 22 or 24, then requests the npm `latest` tag explicitly and makes npm
+> enforce the package's engine declaration. Those two npm qualifiers prevent an unsupported Node
+> runtime from silently selecting an older compatible release. Do not substitute `npx sthayi init`.
+
+Contributing from a source checkout instead? Use the [Development](#development) workflow.
 
 ```bash
 # macOS / Linux — bash or zsh
-npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init
 ```
 
 One line: install once somewhere durable, then detect your AI clients and wire them in one
@@ -68,8 +70,9 @@ After the wizard completes, verify the default installation and state directory:
 This invokes the package from the durable install prefix; `doctor` reports the configured state
 directory, including a custom absolute `STHAYI_HOME` when one is set.
 
-**Why the `--prefix`, and what it does not touch.** `--prefix` is a **per-invocation flag**: it
-tells this one `npm install` where to put the package and changes **nothing** in your npm
+**Why the npm flags, and what they do not touch.** `--prefix` and `--engine-strict` are
+**per-invocation flags**: they tell this one `npm install` where to put the package and to refuse an
+unsupported engine, while changing **nothing** in your npm
 configuration. No `~/.npmrc` is written, `npm config get prefix` reads exactly what it read before,
 and every other npm command you run is unaffected. The install lands under your home directory, so
 installing **Sthayi itself** needs no admin rights once Node.js and npm are available — including on
@@ -99,9 +102,10 @@ Removal of the state directory itself is a separate decision, and one Sthayi lea
 cache*, which is pruned without warning. `init` writes launchers that pin the exact CLI they were
 written from, so a launcher pinned into that cache is wiring that breaks the next time npm cleans
 up. Sthayi refuses to write one and tells you where to install instead — onboarding is a durable
-install first, then `sthayi init`. (Commands that write no launcher — `npx sthayi status`,
-`doctor`, `search` — do run from the cache. `search` is **not** read-only, though: every search
-journals a `memory_retrieve`, bumps recency, and strengthens the association graph.)
+install first, then `sthayi init`. (Commands that write no launcher — `npx sthayi@latest status`,
+`npx sthayi@latest doctor`, `npx sthayi@latest search` — do run from the cache. `search` is **not**
+read-only, though: every search journals a `memory_retrieve`, bumps recency, and strengthens the
+association graph.)
 
 **What “durable” means: anywhere you keep, not anywhere privileged.** Only three locations are
 ephemeral — an `_npx`/`_cacache` path, your system temp directory, and your npm cache. *Everything
@@ -112,16 +116,16 @@ runs as typed:
 
 ```bash
 # 1. THE HEADLINE ROUTE — a prefix inside your own home. This is the durable user-space route.
-npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init
 
 # 2. npm's default global prefix. Available ONLY when your account can already write that prefix
 #    — version managers normally put it inside your home. A default single-user Homebrew install
 #    normally makes its prefix writable by the installing user. Check: npm config get prefix.
 #    If your account cannot write that prefix, use route 1; never add sudo. Its bin is usually on PATH.
-npm install -g sthayi && sthayi init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --engine-strict sthayi@latest && sthayi init
 
 # 3. A plain local install is durable too. Its binary lives in node_modules/.bin.
-mkdir ~/sthayi && cd ~/sthayi && npm i sthayi && ./node_modules/.bin/sthayi init
+mkdir ~/sthayi && cd ~/sthayi && node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm i --engine-strict sthayi@latest && ./node_modules/.bin/sthayi init
 ```
 
 Route 1 is the headline because a normal per-user home is the most reliable writable location.
@@ -173,17 +177,17 @@ that earlier attempt, still pinned at an entry this install never refreshed.
 
 ```powershell
 # PowerShell 7
-npm install -g --prefix "$env:LOCALAPPDATA\sthayi" sthayi && & "$env:LOCALAPPDATA\sthayi\sthayi.cmd" init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$env:LOCALAPPDATA\sthayi" --engine-strict sthayi@latest && & "$env:LOCALAPPDATA\sthayi\sthayi.cmd" init
 ```
 
 ```powershell
 # Windows PowerShell 5.1
-npm install -g --prefix "$env:LOCALAPPDATA\sthayi" sthayi; $ok = $?; if ($ok -and $LASTEXITCODE -eq 0) { & "$env:LOCALAPPDATA\sthayi\sthayi.cmd" init }
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}"; $nodeOk = $?; if ($nodeOk -and $LASTEXITCODE -eq 0) { npm install -g --prefix "$env:LOCALAPPDATA\sthayi" --engine-strict sthayi@latest; $installOk = $?; if ($installOk -and $LASTEXITCODE -eq 0) { & "$env:LOCALAPPDATA\sthayi\sthayi.cmd" init } }
 ```
 
 ```bat
 :: Windows cmd
-npm install -g --prefix "%LOCALAPPDATA%\sthayi" sthayi && "%LOCALAPPDATA%\sthayi\sthayi.cmd" init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "%LOCALAPPDATA%\sthayi" --engine-strict sthayi@latest && "%LOCALAPPDATA%\sthayi\sthayi.cmd" init
 ```
 
 After `init` completes, verify the default state directory with the block for your shell:
@@ -302,9 +306,9 @@ reverse proxy, Tailscale, or VPS is an explicit user action outside Sthayi.
 version.** It names a Node binary and the CLI entry path it was written from, and it executes
 whatever file stands at that pathname each time a client starts it — it reads no manifest and
 compares no version. Upgrade the package **the same way you installed it**: for the headline route
-that is `npm install -g --prefix "$HOME/.local" sthayi@latest`, which replaces
-`~/.local/lib/node_modules/sthayi` in place (or `npm i sthayi@latest` in a local install directory,
-whose CLI stays at `./node_modules/.bin/sthayi`). Reinstalling at the same prefix therefore takes
+that is `npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest`, which replaces
+`~/.local/lib/node_modules/sthayi` in place (or `npm i --engine-strict sthayi@latest` in a local
+install directory, whose CLI stays at `./node_modules/.bin/sthayi`). Reinstalling at the same prefix therefore takes
 effect immediately — the entry path
 does not move, so both launchers run the new code at the very next client launch, and nothing needs
 repinning. Your memory is untouched: the data in `~/.sthayi/` is a different directory from the
@@ -314,12 +318,12 @@ On Windows, upgrade through the same user-space prefix used for installation:
 
 ```powershell
 # PowerShell 5.1 or 7
-npm install -g --prefix "$env:LOCALAPPDATA\sthayi" sthayi@latest
+npm install -g --prefix "$env:LOCALAPPDATA\sthayi" --engine-strict sthayi@latest
 ```
 
 ```bat
 :: Windows cmd
-npm install -g --prefix "%LOCALAPPDATA%\sthayi" sthayi@latest
+npm install -g --prefix "%LOCALAPPDATA%\sthayi" --engine-strict sthayi@latest
 ```
 
 **Repinning is for an entry path that has moved** — after you move the install, install at a
@@ -481,7 +485,7 @@ macOS/Linux route:
 
 ```bash
 node --version   # must begin with v22. or v24.
-npm install -g --prefix "$HOME/.local" sthayi@latest
+npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest
 "$HOME/.local/bin/sthayi" doctor
 ```
 

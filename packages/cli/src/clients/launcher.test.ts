@@ -241,10 +241,16 @@ describe('launcher: an ephemeral install is REFUSED, never copied', () => {
     // appears nowhere. A bare `npm install -g sthayi` would be the version that fails EACCES on the
     // machines that need this message most.
     if (posix) {
-      expect(message).toContain('npm install -g --prefix "$HOME/.local" sthayi');
+      expect(message).toContain(
+        'npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest',
+      );
+      expect(message).toContain('process.versions.node');
       expect(message).toContain('"$HOME/.local/bin/sthayi" init');
     } else {
-      expect(message).toContain('npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi');
+      expect(message).toContain(
+        'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" --engine-strict sthayi@latest',
+      );
+      expect(message).toContain('process.versions.node');
       expect(message).toContain('$env:LOCALAPPDATA\\sthayi\\sthayi.cmd" init');
     }
     expect(message).not.toMatch(/npm install -g sthayi\b/);

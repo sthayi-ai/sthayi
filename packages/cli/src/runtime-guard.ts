@@ -95,14 +95,14 @@ function reinstallCommands(platform: NodeJS.Platform): readonly string[] {
     ? [
         'PowerShell:',
         'npm uninstall -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi',
-        'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi',
+        'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" --engine-strict sthayi@latest',
         'Command Prompt:',
         'npm uninstall -g --prefix "%LOCALAPPDATA%\\sthayi" sthayi',
-        'npm install -g --prefix "%LOCALAPPDATA%\\sthayi" sthayi',
+        'npm install -g --prefix "%LOCALAPPDATA%\\sthayi" --engine-strict sthayi@latest',
       ]
     : [
         'npm uninstall -g --prefix "$HOME/.local" sthayi',
-        'npm install -g --prefix "$HOME/.local" sthayi',
+        'npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest',
       ];
 }
 

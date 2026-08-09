@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -15,11 +16,13 @@ import { describe, expect, it } from 'vitest';
  * and the only shorter fix is `sudo`. The canonical line therefore redirects this one install into
  * a directory the user already owns:
  *
- *     npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init
+ *     node -e "<22-or-24 preflight>" &&
+ *       npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest &&
+ *       "$HOME/.local/bin/sthayi" init
  *
- * `--prefix` is a PER-INVOCATION FLAG. It mutates no npm configuration and writes no `~/.npmrc`, so
- * a reader's other npm commands are unaffected — and because that prefix adds nothing to PATH, the
- * second half of the line has to invoke `init` by the path the first half actually produced.
+ * `--prefix` and `--engine-strict` are PER-INVOCATION FLAGS. They mutate no npm configuration and
+ * write no `~/.npmrc`. The explicit `@latest` spec prevents npm from selecting an older compatible
+ * release, while the preflight stops unsupported Node before npm is invoked.
  *
  * `npx sthayi init` is REFUSED: `npx` runs the CLI out of npm's download cache, and `init` will not
  * pin a launcher at an entry that disappears when that cache is pruned.
@@ -62,9 +65,12 @@ const read = (rel: string): string => fs.readFileSync(path.join(repoRoot, rel), 
 /** Markdown hard-wraps, so a claim routinely straddles a newline. Judge the flattened text. */
 const flat = (rel: string): string => read(rel).replace(/\s+/g, ' ');
 
-/** The one line the docs publish: a user-space prefix, then the binary that prefix produced. */
-const QUICKSTART =
-  'npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init';
+const PREFLIGHT_JS =
+  "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}";
+const NODE_PREFLIGHT = `node -e "${PREFLIGHT_JS}"`;
+
+/** The one line the docs publish: preflight, explicit release, strict engines, then the real shim. */
+const QUICKSTART = `${NODE_PREFLIGHT} && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init`;
 
 /** The shorter line, which is NOT universally admin-free. `-g` followed immediately by the name. */
 const BARE_GLOBAL = /npm install -g sthayi\b/g;
@@ -94,12 +100,46 @@ function fencedBlocks(text: string): { lang: string; body: string }[] {
   return out;
 }
 
+/** Evaluate the literal published preflight against a fake process without spawning or writing. */
+function preflightExitCode(version: string): number {
+  let exitCode = 0;
+  const exit = (code: number): never => {
+    exitCode = code;
+    throw new Error('preflight exit');
+  };
+  try {
+    runInNewContext(PREFLIGHT_JS, {
+      process: { versions: { node: version }, version: `v${version}`, exit },
+      console: { error: () => undefined },
+    });
+  } catch (error) {
+    if (exitCode === 0) throw error;
+  }
+  return exitCode;
+}
+
 describe('safety: the published quickstart is the one line that actually works', () => {
   it('README, SECURITY, the release checklist and the spec all carry the same line', () => {
     for (const rel of ['README.md', 'SECURITY.md', 'docs/RELEASE.md', 'docs/sthayi-v0-spec.md']) {
       expect(flat(rel), `${rel} does not carry the canonical quickstart line`).toContain(
         QUICKSTART,
       );
+    }
+  });
+
+  it('the literal preflight admits 22/24 and rejects Node 25 before npm', () => {
+    expect(preflightExitCode('22.23.2')).toBe(0);
+    expect(preflightExitCode('24.13.0')).toBe(0);
+    expect(preflightExitCode('25.8.1')).toBe(1);
+
+    for (const rel of ['README.md', 'SECURITY.md', 'docs/RELEASE.md', 'docs/sthayi-v0-spec.md']) {
+      const command = flat(rel).indexOf(QUICKSTART);
+      expect(command, `${rel} has no exact hardened quickstart`).toBeGreaterThan(-1);
+      const npm = flat(rel).indexOf('npm install', command);
+      expect(
+        command + NODE_PREFLIGHT.length,
+        `${rel} invokes npm before the preflight ends`,
+      ).toBeLessThan(npm);
     }
   });
 
@@ -208,14 +248,51 @@ describe('safety: the published quickstart is the one line that actually works',
     }
   });
 
+  it('cache-only npx examples request the latest release explicitly', () => {
+    const readme = read('README.md');
+    expect(readme).toContain('npx sthayi@latest status');
+    expect(readme).toContain('npx sthayi@latest doctor');
+    expect(readme).toContain('npx sthayi@latest search');
+    expect(readme).not.toMatch(/npx sthayi (?:status|doctor|search)\b/);
+  });
+
   it('demo.tape records the durable install, not an npx run', () => {
     const tape = read('demo.tape');
-    // VHS strings may be double- or single-quoted; the canonical line contains double quotes, so
-    // the tape necessarily uses the single-quoted form for it.
     const typed = tape.split('\n').filter((l) => /^Type\s+["']/.test(l));
-    expect(typed.some((l) => l.includes(QUICKSTART))).toBe(true);
+    expect(typed.some((l) => l.replaceAll('\\"', '"').includes(QUICKSTART))).toBe(true);
     for (const line of typed) {
       expect(/npx\s+sthayi/.test(line), `demo.tape types an npx run: ${line}`).toBe(false);
+    }
+  });
+
+  it('every copied registry install requests latest explicitly and enforces engines', () => {
+    const copied = ONBOARDING_DOCS.flatMap((rel) => {
+      if (rel === 'demo.tape') {
+        return read(rel)
+          .split('\n')
+          .filter((line) => /^Type\s+["']/.test(line))
+          .map((line) => line.replaceAll('\\"', '"'));
+      }
+      return fencedBlocks(read(rel)).flatMap(({ body }) => body.split('\n'));
+    });
+    const installs = copied.filter(
+      (line) => /npm\s+i(?:nstall)?\b/.test(line) && /\bsthayi(?:@|\b)/.test(line),
+    );
+    expect(installs.length).toBeGreaterThan(0);
+    for (const command of installs) {
+      expect(command, `unqualified copied registry install: ${command}`).toContain('sthayi@latest');
+      expect(command, `copied registry install does not enforce engines: ${command}`).toContain(
+        '--engine-strict',
+      );
+    }
+
+    for (const rel of ONBOARDING_DOCS) {
+      const matches = flat(rel).match(/npm\s+i(?:nstall)?[^`;]{0,180}sthayi@latest/g) ?? [];
+      for (const command of matches) {
+        expect(command, `${rel} has a non-strict registry install: ${command}`).toContain(
+          '--engine-strict',
+        );
+      }
     }
   });
 });
@@ -263,12 +340,15 @@ describe('safety: every bootstrap command runs as typed', () => {
       const text = flat(rel);
       let from = 0;
       for (;;) {
-        const at = text.indexOf('npm install -g --prefix "$HOME/.local" sthayi', from);
+        const at = text.indexOf(
+          'npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest',
+          from,
+        );
         if (at === -1) {
           break;
         }
         const window = text.slice(at, at + 240);
-        const isUpgrade = /sthayi@latest/.test(window.slice(0, 60));
+        const isUpgrade = !/\binit\b/.test(window);
         expect(
           isUpgrade || window.includes('"$HOME/.local/bin/sthayi"'),
           `${rel} installs into the user-space prefix and then names no path the CLI is ` +
@@ -291,7 +371,9 @@ describe('safety: every bootstrap command runs as typed', () => {
       const text = flat(rel);
       let from = 0;
       for (;;) {
-        const found = text.slice(from).search(/npm i(?:nstall)? sthayi(?:@\S+)?\b(?! -g)/);
+        const found = text
+          .slice(from)
+          .search(/npm i(?:nstall)? --engine-strict sthayi@latest\b(?! -g)/);
         if (found === -1) {
           break;
         }
@@ -416,9 +498,15 @@ describe('safety: no command block mixes two shells', () => {
         // into must be the name the condition tests.
         expect(
           body,
-          `${rel}'s PowerShell 5.1 block does not gate init on BOTH the install's captured success state and its exit code`,
+          `${rel}'s PowerShell 5.1 block does not gate npm on BOTH the Node preflight's captured success state and its exit code`,
         ).toMatch(
-          /;\s*\$(\w+)\s*=\s*\$\?\s*;\s*if\s*\(\s*\$\1\s+-and\s+\$LASTEXITCODE\s+-eq\s+0\s*\)\s*\{\s*&/,
+          /node -e "[^"]+";\s*\$(\w+)\s*=\s*\$\?\s*;\s*if\s*\(\s*\$\1\s+-and\s+\$LASTEXITCODE\s+-eq\s+0\s*\)\s*\{\s*npm install/,
+        );
+        expect(
+          body,
+          `${rel}'s PowerShell 5.1 block does not gate init on BOTH npm's captured success state and its exit code`,
+        ).toMatch(
+          /npm install [^;]+;\s*\$(\w+)\s*=\s*\$\?\s*;\s*if\s*\(\s*\$\1\s+-and\s+\$LASTEXITCODE\s+-eq\s+0\s*\)\s*\{\s*&/,
         );
       }
     }

@@ -243,6 +243,7 @@ describe('Dockerfile.freshtest proves the advertised non-root install', () => {
     for (const ins of installs) {
       // `npm install -g <tgz>` with no prefix is the root system install nobody is told to run.
       expect(ins.args, `Dockerfile.freshtest:${ins.at}`).toMatch(/--prefix\s+"\$HOME\/\.local"/);
+      expect(ins.args, `Dockerfile.freshtest:${ins.at}`).toMatch(/--engine-strict/);
     }
   });
 

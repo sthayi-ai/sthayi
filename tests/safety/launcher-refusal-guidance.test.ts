@@ -46,6 +46,7 @@ const notRoot = typeof process.getuid !== 'function' || process.getuid() !== 0;
  */
 const NPM_STUB = `#!/usr/bin/env bash
 set -euo pipefail
+echo "NPM_STUB_CALLED"
 shim() {
   mkdir -p "$(dirname "$1")"
   printf '#!/usr/bin/env bash\\necho "RAN sthayi $*"\\n' > "$1"
@@ -56,11 +57,15 @@ case "\${1:-}" in
     shift
     prefix=""
     global=0
+    engine_strict=0
+    package=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -g|--global) global=1 ;;
         --prefix) prefix="\${2:-}"; shift ;;
         --prefix=*) prefix="\${1#--prefix=}" ;;
+        --engine-strict) engine_strict=1 ;;
+        sthayi*) package="$1" ;;
       esac
       shift
     done
@@ -69,8 +74,16 @@ case "\${1:-}" in
         echo "npm ERR! code EACCES" >&2
         exit 243
       fi
+      if [ "$engine_strict" != 1 ] || [ "$package" != "sthayi@latest" ]; then
+        echo "npm stub refused a non-strict or unqualified Sthayi install" >&2
+        exit 64
+      fi
       shim "$prefix/bin/sthayi"
     else
+      if [ "$engine_strict" != 1 ] || [ "$package" != "sthayi@latest" ]; then
+        echo "npm stub refused a non-strict or unqualified Sthayi install" >&2
+        exit 64
+      fi
       shim "node_modules/.bin/sthayi"
     fi
     ;;
@@ -78,9 +91,20 @@ esac
 exit 0
 `;
 
-const POSIX_INSTALL_ROUTE =
-  'npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init';
+const NODE_PREFLIGHT =
+  "node -e \"const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}\"";
+const POSIX_INSTALL_ROUTE = `${NODE_PREFLIGHT} && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init`;
 const UNSCOPED_CONTROL_ROUTE = 'npm install -g sthayi && sthayi init';
+
+const NODE_STUB = `#!/usr/bin/env bash
+set -euo pipefail
+major="\${STHAYI_TEST_NODE_MAJOR:-24}"
+if [ "$major" = 22 ] || [ "$major" = 24 ]; then
+  exit 0
+fi
+echo "Sthayi requires Node.js 22 or 24 (24 LTS recommended)." >&2
+exit 1
+`;
 
 /** The refusal text for an ephemeral entry, taken from the real refusal path. */
 function refusalFor(entry: string): string {
@@ -212,6 +236,9 @@ describe.skipIf(!posix)(
       for (const message of everyBranch()) {
         for (const command of routeCommands(message)) {
           expect(command).toContain('--prefix');
+          expect(command).toContain('--engine-strict');
+          expect(command).toContain('sthayi@latest');
+          expect(command).toContain(NODE_PREFLIGHT);
         }
         expect(message).not.toMatch(/npm install -g sthayi\b/);
         expect(message).not.toMatch(/npm i(?:nstall)? -g\s+sthayi/);
@@ -254,7 +281,7 @@ describe.skipIf(!posix)(
      * The route gets its own HOME so `~/.local` starts clean, a stub `npm` on PATH, and the default
      * global bin on PATH exactly as a real global install would have it.
      */
-    function runRoute(command: string): { status: number | null; out: string } {
+    function runRoute(command: string, nodeMajor = 24): { status: number | null; out: string } {
       const box = freshDir('route');
       const fakeHome = path.join(box, 'home');
       const defaultPrefix = path.join(box, 'prefix');
@@ -264,7 +291,9 @@ describe.skipIf(!posix)(
       fs.mkdirSync(path.join(fakeHome, '.local', 'bin'), { recursive: true });
       fs.mkdirSync(stubDir);
       fs.writeFileSync(path.join(stubDir, 'npm'), NPM_STUB, { mode: 0o755 });
+      fs.writeFileSync(path.join(stubDir, 'node'), NODE_STUB, { mode: 0o755 });
       fs.chmodSync(path.join(stubDir, 'npm'), 0o755);
+      fs.chmodSync(path.join(stubDir, 'node'), 0o755);
 
       const options = {
         encoding: 'utf8',
@@ -272,6 +301,7 @@ describe.skipIf(!posix)(
         env: {
           PATH: `${stubDir}:${path.join(defaultPrefix, 'bin')}:/usr/bin:/bin`,
           HOME: fakeHome,
+          STHAYI_TEST_NODE_MAJOR: String(nodeMajor),
         },
       } as const;
       // Execute only the two literal scripts this test owns. The equality gate still proves the
@@ -305,9 +335,18 @@ describe.skipIf(!posix)(
         for (const command of commands) {
           const { status, out } = runRoute(command);
           expect(status, `${command}\n${out}`).toBe(0);
+          expect(out, `${command}\n${out}`).toContain('NPM_STUB_CALLED');
           expect(out, `${command}\n${out}`).toContain('RAN sthayi init');
         }
       }
+    });
+
+    it('Node 25 is refused before npm can resolve or install any package', () => {
+      const { status, out } = runRoute(POSIX_INSTALL_ROUTE, 25);
+      expect(status, out).not.toBe(0);
+      expect(out).toContain('Sthayi requires Node.js 22 or 24');
+      expect(out).not.toContain('NPM_STUB_CALLED');
+      expect(out).not.toContain('RAN sthayi init');
     });
 
     it('CONTROL — the stub really does refuse an unscoped global install', () => {
@@ -368,6 +407,9 @@ describe('safety: the Windows install guidance is per-shell and never mixed', ()
     const message = windowsRefusal();
     for (const command of routeCommands(message)) {
       expect(command).toContain('--prefix');
+      expect(command).toContain('--engine-strict');
+      expect(command).toContain('sthayi@latest');
+      expect(command).toContain(NODE_PREFLIGHT);
     }
     expect(message).not.toMatch(/\bsudo\b|\brunas\b|administrator/i);
     expect(message).not.toMatch(/npm install -g sthayi\b/);

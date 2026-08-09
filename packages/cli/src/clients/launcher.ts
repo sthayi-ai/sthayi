@@ -85,7 +85,8 @@ function realpathOr(p: string): string {
  * WHAT THIS DOES *NOT* REQUIRE: a GLOBAL install. Only three shapes are ephemeral — an
  * `_npx`/`_cacache` path segment, anything under the system temp dir, and anything under
  * `npm_config_cache`. Every other location is durable and is pinned exactly where it stands, so a
- * plain `npm i sthayi` in a directory the user keeps qualifies just as well as `npm install -g`.
+ * `npm i --engine-strict sthayi@latest` after the same preflight in a directory the user keeps
+ * qualifies just as well as `npm install -g`.
  * Anything under the Sthayi home is OURS and durable by definition, even when STHAYI_HOME itself
  * sits under a temp dir (tests).
  */
@@ -308,6 +309,10 @@ function globalPrefixWritable(prefix: string, platform: NodeJS.Platform): boolea
 /**
  * The install route, per SHELL, as one line that runs from start to finish.
  *
+ * PREFLIGHT BEFORE RESOLUTION. A bare package name lets npm choose an older release whose engines
+ * admit the active runtime. Every copied route therefore rejects unsupported Node majors before
+ * npm runs, requests `sthayi@latest` explicitly, and enables per-invocation `--engine-strict`.
+ *
  * A SCOPED PREFIX, ALWAYS — never a bare `npm install -g sthayi`. That form installs into whatever
  * npm's configured global prefix happens to be, and on a machine where that prefix is root-owned it
  * fails outright (EACCES) — so presenting it as the universal answer hands half the world a command
@@ -351,33 +356,33 @@ interface InstallRoute {
   command: string;
 }
 
+const NODE_PREFLIGHT =
+  "node -e \"const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}\"";
+
 /** The one-clause form of the scoped install, for messages with no room for a command block. */
 const DURABLE_INSTALL_HINT =
-  '`npm install -g --prefix "$HOME/.local" sthayi` on macOS/Linux, or the equivalent for your shell in README.md';
+  '`npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest` on macOS/Linux, or the equivalent for your shell in README.md';
 
 const INSTALL_ROUTES: { posix: InstallRoute[]; win32: InstallRoute[] } = {
   posix: [
     {
       shell: '',
-      command: 'npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init',
+      command: `${NODE_PREFLIGHT} && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init`,
     },
   ],
   win32: [
     {
       shell: 'PowerShell 7:',
-      command:
-        'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi && & "$env:LOCALAPPDATA\\sthayi\\sthayi.cmd" init',
+      command: `${NODE_PREFLIGHT} && npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" --engine-strict sthayi@latest && & "$env:LOCALAPPDATA\\sthayi\\sthayi.cmd" init`,
     },
     {
       shell:
         'PowerShell 5.1 (no `&&` in 5.1 — the install’s success state and exit code are checked instead):',
-      command:
-        'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi; $ok = $?; if ($ok -and $LASTEXITCODE -eq 0) { & "$env:LOCALAPPDATA\\sthayi\\sthayi.cmd" init }',
+      command: `${NODE_PREFLIGHT}; $nodeOk = $?; if ($nodeOk -and $LASTEXITCODE -eq 0) { npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" --engine-strict sthayi@latest; $installOk = $?; if ($installOk -and $LASTEXITCODE -eq 0) { & "$env:LOCALAPPDATA\\sthayi\\sthayi.cmd" init } }`,
     },
     {
       shell: 'cmd:',
-      command:
-        'npm install -g --prefix "%LOCALAPPDATA%\\sthayi" sthayi && "%LOCALAPPDATA%\\sthayi\\sthayi.cmd" init',
+      command: `${NODE_PREFLIGHT} && npm install -g --prefix "%LOCALAPPDATA%\\sthayi" --engine-strict sthayi@latest && "%LOCALAPPDATA%\\sthayi\\sthayi.cmd" init`,
     },
   ],
 };

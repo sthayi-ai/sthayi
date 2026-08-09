@@ -18,9 +18,9 @@ Enter
 Sleep 1s
 
 # The whole onboarding, in one copy-paste line: a durable user-space install, then init.
-# `--prefix` is per-invocation — it mutates no npm config — and it needs no admin rights.
+# The Node preflight runs before npm; `--prefix` and `--engine-strict` are per-invocation.
 # `npx sthayi init` is refused — it would pin a launcher inside npm's download cache.
-Type 'npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init --yes' Sleep 500ms Enter
+Type "node -e \"const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}\" && npm install -g --prefix \"$HOME/.local\" --engine-strict sthayi@latest && \"$HOME/.local/bin/sthayi\" init --yes" Sleep 500ms Enter
 Sleep 12s
 
 # That prefix adds nothing to PATH, so the demo puts the durable launcher dir on it once.

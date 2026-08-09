@@ -159,17 +159,19 @@ const DURABLE_BASES = ['$GITHUB_WORKSPACE', '${GITHUB_WORKSPACE}', '$HOME', '${H
 
 /**
  * Resolve the directory the release tarball is npm-installed into: find the single
- * `npm install "$TARBALL"`, walk back to the `cd` that put the shell there, and read that variable
+ * `npm install --engine-strict "$TARBALL"`, walk back to the `cd` that put the shell there, and read that variable
  * out of the state the job has reached AT THAT LINE — the value it was last assigned before the
  * install, not the first one it ever held. No `cd`, no resolvable variable, or more than one
  * tarball install and this fails — an install location the gate cannot name is not a pass.
  */
 function smokeInstallDir(text?: string): { raw: string; expanded: string; varName: string } {
   const lines = shellLines('smoke-install', text);
-  const installs = lines.filter(({ line }) => /^npm\s+install\s+"?\$\{?TARBALL/.test(line));
+  const installs = lines.filter(({ line }) =>
+    /^npm\s+install\s+--engine-strict\s+"?\$\{?TARBALL/.test(line),
+  );
   expect(
     installs.length,
-    'expected exactly one `npm install "$TARBALL"` in the smoke-install job',
+    'expected exactly one strict `npm install --engine-strict "$TARBALL"` in the smoke-install job',
   ).toBe(1);
   const installAt = (installs[0] as { at: number }).at;
   const { vars, literals } = shellStateAt(lines, installAt);
