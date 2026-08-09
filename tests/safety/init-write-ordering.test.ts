@@ -128,6 +128,8 @@ describe('safety: init settles durability first, then the startup gate, then wri
     const message = (err as Error | undefined)?.message ?? '';
     expect(message).toMatch(/refusing to write a launcher pinned to/);
     expect(message).toMatch(/npm install -g[^\n]*\bsthayi\b/);
+    expect(message).toContain('--engine-strict sthayi@latest');
+    expect(message).toContain('process.versions.node');
     expect(message).not.toMatch(/npx\s+sthayi\s+init/);
     // ONLY the jam this test planted: no database, no vault key, no checkpoint, no bin, no skills
     expect(fs.readdirSync(home.home).sort()).toEqual(['journal.checkpoint.lock']);

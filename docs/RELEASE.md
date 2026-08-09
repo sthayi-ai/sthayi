@@ -35,7 +35,7 @@ The **anti-friction invariants below** are the release gate — every one must h
 - [ ] **No telemetry** — no network calls except explicitly invoked Oracle jobs and `sthayi
       qualify` calls to the user's selected provider. Oracle sends bounded, masked memory batches;
       `qualify` sends shipped synthetic conformance fixtures, not user memories.
-- [ ] **Runtime prerequisite is explicit** — user-facing installation docs state that v0.1.1
+- [ ] **Runtime prerequisite is explicit** — user-facing installation docs state that v0.1.2
       supports Node.js 22 and 24, recommends Node 24 LTS, and requires npm; they link to the
       official Node.js download page and distinguish that prerequisite from installing Sthayi.
       Installing Node.js may require administrator approval depending on the operating system and
@@ -47,8 +47,10 @@ The **anti-friction invariants below** are the release gate — every one must h
       user's memory lives in `~/.sthayi/`. Do not describe either as holding "everything" — an
       uninstall removes the first and must leave the second standing.
 - [ ] **One copy-paste line to running** — bash/zsh:
-      `npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init`.
-      `--prefix` is a per-invocation flag that mutates no npm configuration and writes no
+      `node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init`.
+      The first clause must reject every unsupported major before npm is invoked. `@latest` prevents
+      npm from resolving an older engine-compatible release, while `--prefix` and `--engine-strict`
+      are per-invocation flags that mutate no npm configuration and write no
       `~/.npmrc`. A bare `npm install -g sthayi` is **not** an acceptable substitute for this
       checklist item: it needs a writable global prefix and fails `EACCES` where the prefix is
       root-owned. `npx sthayi init` is refused (it would pin a launcher inside npm's download
@@ -81,7 +83,7 @@ The **anti-friction invariants below** are the release gate — every one must h
 - [ ] `pnpm audit --prod --audit-level moderate` exits 0 (the release workflow enforces this too).
 - [ ] CI green on the supported matrix: **Node 22 and Node 24 on Linux, macOS, and Windows**. The
       packed-tarball Node 22/24 smoke also runs on Linux. Every package manifest says
-      `22.x || 24.x`; unsupported majors are outside the v0.1.1 contract.
+      `22.x || 24.x`; unsupported majors are outside the v0.1.2 contract.
 - [ ] Runtime-policy tests prove unsupported majors—including Node 25—refuse before importing the
       native-dependent CLI, and native `NODE_MODULE_VERSION` mismatches on 22/24 produce the
       documented reinstall repair rather than a raw stack trace.
@@ -90,7 +92,7 @@ The **anti-friction invariants below** are the release gate — every one must h
       (4); keyless command matrix (6); browser-clean core; no-stdout MCP.
 - [ ] `sthayi doctor` clean on a real machine.
 - [ ] `pnpm freshtest` green locally (packs the tarball, installs it in a clean Node 22 container
-      **as a non-root user via the advertised `npm install -g --prefix "$HOME/.local"` route**,
+      **as a non-root user via the advertised `npm install -g --prefix "$HOME/.local" --engine-strict` route**,
       then runs the **fresh-install smoke subset** — `--version`, `--help`, `init --yes`, `doctor`,
       `status`, `journal` — as the container's entrypoint, so a failure is a `docker run` failure)
       — **requires Docker**. That subset is **not** the keyless matrix and is not described as one:
@@ -324,9 +326,13 @@ handshake against the installed tarball).
       `io.github.sthayi-ai/sthayi@X.Y.Z` version. Retrying this job never re-enters npm publication.
 - [ ] **npm package-name install smoke, before announcement:** from clean standard-user profiles or
       disposable clean VMs, run the advertised package-name install/init form pinned to
-      `sthayi@X.Y.Z`, then verify `--version` and run `doctor`. Cover macOS bash/zsh, Linux bash,
+      `sthayi@X.Y.Z` with `--engine-strict`, then verify `--version` and run `doctor`. Cover macOS
+      bash/zsh, Linux bash,
       Windows PowerShell 7, Windows PowerShell 5.1, and Windows cmd; use a separate clean profile or
-      prefix for each shell route so one run cannot satisfy the next from leftover state. Do not
+      prefix for each shell route so one run cannot satisfy the next from leftover state. From one
+      clean Node 25 profile, run the same advertised command and require its preflight to exit
+      non-zero with the supported-major repair before npm runs or creates the Sthayi prefix. This
+      negative probe prevents a future compatible-version fallback. Do not
       publish the draft GitHub release or announce the release until every npm-registry fetch smoke
       passes. Record the dated registry-fetch result in the draft GitHub release notes before
       publishing that release. Do not rely on a later README edit: the README embedded in

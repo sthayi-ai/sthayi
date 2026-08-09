@@ -47,26 +47,28 @@ instead REFUSED at plan time — so `--dry-run` refuses too — with a message p
 install. Onboarding is therefore a durable install and then `sthayi init`, in one copy-paste line
 (bash/zsh):
 
-Sthayi v0.1.1 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
+Sthayi v0.1.2 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
 [README Quickstart](README.md#quickstart) explains how to check and install that separate
-prerequisite. Unsupported majors—including Node 25—are refused before the native SQLite dependency
-loads. Installing Node.js may require administrator approval depending on the operating system and
-install method; once Node.js and npm are available, the Sthayi route below is entirely in user
-space.
+prerequisite. The copied command actively refuses unsupported majors—including Node 25—before npm
+can resolve an older compatible release; the package also refuses them before the native SQLite
+dependency loads. Installing Node.js may require administrator approval depending on the operating
+system and install method; once Node.js and npm are available, the Sthayi route below is entirely
+in user space.
 
 ```bash
-npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init
+node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init
 ```
 
-`--prefix` is a **per-invocation flag**: it changes no npm configuration and writes no `~/.npmrc`,
-so `npm config get prefix` reads exactly what it read before and every other npm command is
-unaffected. It puts the package at `~/.local/lib/node_modules/sthayi` and npm's shim at
+`--prefix` and `--engine-strict` are **per-invocation flags**: they change no npm configuration and
+write no `~/.npmrc`, so `npm config get prefix` reads exactly what it read before and every other
+npm command is unaffected. It puts the package at `~/.local/lib/node_modules/sthayi` and npm's shim at
 `~/.local/bin/sthayi` — inside the user's own home, which is why installing Sthayi through this
 route needs no admin rights and no `sudo` once Node.js and npm are available, even on a machine
 whose default global prefix is root-owned, where a plain
 `npm install -g sthayi` fails with `EACCES` instead. Durable means *anywhere you keep*: that
 user-space prefix, npm's default global prefix **where the account can already write it**, or a
-plain `npm i sthayi` in an ordinary directory (then `./node_modules/.bin/sthayi init`). Commands
+plain `npm i --engine-strict sthayi@latest` in an ordinary directory after the same Node preflight
+(then `./node_modules/.bin/sthayi init`). Commands
 that write no launcher (`status`, `doctor`, `search`) do keep working straight from the cache —
 note that `search` is **not** read-only: it journals a `memory_retrieve`, bumps recency, and
 updates the association graph.

@@ -151,6 +151,8 @@ describe('init refuses an EPHEMERAL entry BEFORE it writes anything', () => {
     const message = (err as Error | undefined)?.message ?? '';
     expect(message).toMatch(/refusing to write a launcher pinned to/);
     expect(message).toMatch(/npm install -g[^\n]*\bsthayi\b/);
+    expect(message).toContain('--engine-strict sthayi@latest');
+    expect(message).toContain('process.versions.node');
     expect(message).not.toMatch(/npx\s+sthayi\s+init/);
   }
 

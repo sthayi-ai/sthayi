@@ -88,16 +88,22 @@ describe('native-addon compatibility diagnosis', () => {
     expect(message).toContain('native SQLite module is incompatible');
     expect(message).toContain('Node.js v24.13.0');
     expect(message).toContain('npm uninstall -g --prefix "$HOME/.local" sthayi');
-    expect(message).toContain('npm install -g --prefix "$HOME/.local" sthayi');
+    expect(message).toContain(
+      'npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest',
+    );
     expect(message).not.toContain('NODE_MODULE_VERSION 127');
   });
 
   it('renders the documented user-space repair command on Windows', () => {
     const message = cliFailureMessage(abiError, { nodeVersion: '24.13.0', platform: 'win32' });
     expect(message).toContain('PowerShell:');
-    expect(message).toContain('npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" sthayi');
+    expect(message).toContain(
+      'npm install -g --prefix "$env:LOCALAPPDATA\\sthayi" --engine-strict sthayi@latest',
+    );
     expect(message).toContain('Command Prompt:');
-    expect(message).toContain('npm install -g --prefix "%LOCALAPPDATA%\\sthayi" sthayi');
+    expect(message).toContain(
+      'npm install -g --prefix "%LOCALAPPDATA%\\sthayi" --engine-strict sthayi@latest',
+    );
   });
 
   it('does not relabel an ordinary product error as install damage', () => {

@@ -10,7 +10,7 @@
 # every command against the INSTALLED TARBALL.
 #
 # WHY NON-ROOT, AND WHY `--prefix`. The advertised headline install is
-# `npm install -g --prefix "$HOME/.local" sthayi && "$HOME/.local/bin/sthayi" init`. A root
+# `npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest`, then the prefix shim. A root
 # `npm install -g` writes to the image's SYSTEM prefix — a path an ordinary reader cannot write to
 # without sudo — so it would prove a route nobody is told to take while hiding every permission,
 # PATH and shim consequence of the route they ARE told to take. This image installs as the
@@ -34,8 +34,9 @@ USER node
 WORKDIR /home/node
 ENV HOME=/home/node
 
-# The advertised headline install, verbatim: user-space, no sudo, no system prefix.
-RUN npm install -g --prefix "$HOME/.local" /home/node/sthayi.tgz
+# The advertised headline route's install mechanics, against the packed artifact: user-space,
+# engine-strict, no sudo, no system prefix.
+RUN npm install -g --prefix "$HOME/.local" --engine-strict /home/node/sthayi.tgz
 
 # Fresh-install smoke subset — these six commands must succeed with ZERO env vars, invoked through
 # the shim the `--prefix` install wrote and NOT through PATH: the headline route adds nothing to

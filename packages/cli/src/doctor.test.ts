@@ -367,7 +367,9 @@ describe('doctor (observational, key-loss aware)', () => {
     expect(check.detail).toContain('Node.js v24.13.0');
     expect(check.detail).not.toContain('NODE_MODULE_VERSION');
     expect(check.fix).toContain('reinstall Sthayi');
-    expect(check.fix).toContain('npm install -g --prefix "$HOME/.local" sthayi');
+    expect(check.fix).toContain(
+      'npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest',
+    );
     expect(check.fix).not.toContain('restore ~/.sthayi from backup');
   });
 

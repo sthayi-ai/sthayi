@@ -155,6 +155,13 @@ function routeCommands(message: string): string[] {
     .map((l) => l.trim());
 }
 
+/** Strip the separately tested Node preflight so this evaluator sees npm -> init. */
+function installSegment(line: string): string {
+  const at = line.indexOf('npm install');
+  expect(at, `route has no npm install: ${line}`).toBeGreaterThan(-1);
+  return line.slice(at);
+}
+
 /** The Windows refusal text — the platform is a parameter, so a POSIX run can read it. */
 function windowsRoutes(): string[] {
   return routeCommands(
@@ -171,7 +178,7 @@ function readmeInstallLines(): string[] {
   const fence = /```([^\n]*)\n([\s\S]*?)```/g;
   for (let m = fence.exec(readme()); m !== null; m = fence.exec(readme())) {
     for (const line of (m[2] ?? '').split('\n')) {
-      if (/^\s*npm install .*sthayi\b/.test(line)) {
+      if (/npm install .*sthayi\b/.test(line)) {
         out.push(line.trim());
       }
     }
@@ -184,7 +191,7 @@ describe('safety: a failed install never runs the init half', () => {
     const routes = windowsRoutes();
     expect(routes).toHaveLength(3);
     for (const route of routes) {
-      const parsed = parseLine(route);
+      const parsed = parseLine(installSegment(route));
       expect(parsed, `unrecognised sequencing in: ${route}`).toBeDefined();
       const line = parsed as Sequenced;
       expect(line.install, route).toMatch(/npm install/);
@@ -206,7 +213,7 @@ describe('safety: a failed install never runs the init half', () => {
     // cannot see: nothing native ran, so `$LASTEXITCODE` is untouched and reads as whatever the
     // session left there. A gate gets no signal from a variable the failure never wrote.
     for (const route of windowsRoutes()) {
-      const line = parseLine(route) as Sequenced;
+      const line = parseLine(installSegment(route)) as Sequenced;
       expect(line, `unrecognised sequencing in: ${route}`).toBeDefined();
       for (const stale of [0, 1]) {
         expect(
@@ -218,17 +225,19 @@ describe('safety: a failed install never runs the init half', () => {
   });
 
   it('the PowerShell 5.1 route gates without `&&`, which that shell does not have', () => {
-    const ps51 = windowsRoutes().find((r) => r.includes(';')) as string;
+    const ps51 = windowsRoutes().find((r) => r.includes('$nodeOk')) as string;
     expect(ps51, 'no PowerShell 5.1 route is published').toBeDefined();
     expect(ps51).not.toContain('&&');
     expect(ps51).toMatch(/\$LASTEXITCODE\s+-eq\s+0/);
     // The success state is CAPTURED IMMEDIATELY after the install and nowhere else: `$?` describes
     // the statement that just ran, so a capture even one statement later describes the capture.
-    expect(ps51).toMatch(/sthayi\s*;\s*\$\w+\s*=\s*\$\?\s*;/);
-    // `init` is reachable only from inside the gated block.
-    const braced = /\{([^}]*)\}/.exec(ps51)?.[1] ?? '';
-    expect(braced).toMatch(/init/);
-    expect(ps51.replace(braced, '')).not.toMatch(/init/);
+    expect(ps51).toMatch(/sthayi@latest\s*;\s*\$\w+\s*=\s*\$\?\s*;/);
+    expect(ps51).toMatch(
+      /node -e "[^"]+";\s*\$(\w+)\s*=\s*\$\?;\s*if\s*\(\$\1\s+-and\s+\$LASTEXITCODE\s+-eq\s+0\)\s*\{\s*npm install/,
+    );
+    expect(installSegment(ps51)).toMatch(
+      /;\s*\$(\w+)\s*=\s*\$\?;\s*if\s*\(\$\1\s+-and\s+\$LASTEXITCODE\s+-eq\s+0\)\s*\{\s*&[^}]+init\s*\}/,
+    );
   });
 
   it('every README install line is gated too, and matches the line the CLI prints', () => {
@@ -237,10 +246,10 @@ describe('safety: a failed install never runs the init half', () => {
     for (const line of published) {
       // An upgrade-only line invokes no Sthayi command after npm, so there is no second half to
       // sequence. Keep that exception exact: first-install lines still have to parse below.
-      if (/^npm install .+\bsthayi@latest$/.test(line)) {
+      if (!/\binit\b/.test(line)) {
         continue;
       }
-      const parsed = parseLine(line);
+      const parsed = parseLine(installSegment(line));
       expect(parsed, `unrecognised sequencing in README line: ${line}`).toBeDefined();
       const sequenced = parsed as Sequenced;
       if (!/init/.test(sequenced.runs)) {
