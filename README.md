@@ -51,6 +51,8 @@ needs neither `sudo` nor administrator rights.
 > enforce the package's engine declaration. Those two npm qualifiers prevent an unsupported Node
 > runtime from silently selecting an older compatible release. Do not substitute `npx sthayi init`.
 
+Contributing from a source checkout instead? Use the [Development](#development) workflow.
+
 ```bash
 # macOS / Linux — bash or zsh
 node -e "const m=Number(process.versions.node.split('.')[0]);if(m===22||m===24){}else{console.error('Sthayi requires Node.js 22 or 24 (24 LTS recommended). Detected '+process.version+'. Install Node.js 24 LTS: https://nodejs.org/en/download');process.exit(1)}" && npm install -g --prefix "$HOME/.local" --engine-strict sthayi@latest && "$HOME/.local/bin/sthayi" init
