@@ -47,7 +47,7 @@ instead REFUSED at plan time — so `--dry-run` refuses too — with a message p
 install. Onboarding is therefore a durable install and then `sthayi init`, in one copy-paste line
 (bash/zsh):
 
-Sthayi v0.1.2 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
+Sthayi v0.1.3 supports Node.js 22 and 24, with Node 24 LTS recommended, and requires npm. The
 [README Quickstart](README.md#quickstart) explains how to check and install that separate
 prerequisite. The copied command actively refuses unsupported majors—including Node 25—before npm
 can resolve an older compatible release; the package also refuses them before the native SQLite
