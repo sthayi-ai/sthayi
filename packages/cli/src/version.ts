@@ -5,4 +5,4 @@
  * pins both server.json version fields and package.json mcpName. The release workflow asserts the
  * tag, package, CLI, MCP handshake and Registry manifest identities before publishing.
  */
-export const VERSION = '0.1.2';
+export const VERSION = '0.1.3';
