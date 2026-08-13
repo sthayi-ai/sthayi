@@ -9,13 +9,13 @@
   "homepage": "https://sthayi.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sthayi-ai/sthayi.git",
+    "url": "git+https://github.com/sthayi-ai/sthayi.git",
     "directory": "packages/cli"
   },
   "bugs": "https://github.com/sthayi-ai/sthayi/issues",
   "keywords": ["mcp", "memory", "local-first", "ai", "sovereign", "model-context-protocol"],
-  "bin": { "sthayi": "./dist/index.js" },
-  "main": "./dist/index.js",
+  "bin": { "sthayi": "dist/index.js" },
+  "main": "dist/index.js",
   "files": ["dist", "prompts"],
   "engines": { "node": "22.x || 24.x" },
   "publishConfig": { "access": "public" },
